@@ -35,6 +35,18 @@ namespace uapmd::ara {
                 }
             }
 
+            void applyNativeAraProjectEvent(const ProjectDocumentEvent& event) {
+                auto masterTrackSnapshot = engine_.timeline().buildMasterTrackSnapshot();
+                for (auto& [pluginInstanceId, document] : native_ara_documents_) {
+                    (void) pluginInstanceId;
+                    if (document.controller)
+                        document.controller->applyProjectDocumentEvent(
+                            engine_.timeline().projectDocumentView(),
+                            masterTrackSnapshot,
+                            event);
+                }
+            }
+
         public:
             explicit AraSupportImpl(SequencerEngine& engine)
                 : engine_(engine)
@@ -150,53 +162,43 @@ namespace uapmd::ara {
             }
 
             void masterTrackChanged(const ProjectDocumentEvent& event) override {
-                (void) event;
-                resyncNativeAraDocuments();
+                applyNativeAraProjectEvent(event);
             }
 
             void trackAdded(const ProjectDocumentEvent& event) override {
-                (void) event;
-                resyncNativeAraDocuments();
+                applyNativeAraProjectEvent(event);
             }
 
             void trackRemoved(const ProjectDocumentEvent& event) override {
-                (void) event;
-                resyncNativeAraDocuments();
+                applyNativeAraProjectEvent(event);
             }
 
             void trackChanged(const ProjectDocumentEvent& event) override {
-                (void) event;
-                resyncNativeAraDocuments();
+                applyNativeAraProjectEvent(event);
             }
 
             void clipAdded(const ProjectDocumentEvent& event) override {
-                (void) event;
-                resyncNativeAraDocuments();
+                applyNativeAraProjectEvent(event);
             }
 
             void clipRemoved(const ProjectDocumentEvent& event) override {
-                (void) event;
-                resyncNativeAraDocuments();
+                applyNativeAraProjectEvent(event);
             }
 
             void clipChanged(const ProjectDocumentEvent& event) override {
-                (void) event;
-                resyncNativeAraDocuments();
+                applyNativeAraProjectEvent(event);
             }
 
             void audioSourceAdded(const ProjectDocumentEvent& event) override {
-                (void) event;
-                resyncNativeAraDocuments();
+                applyNativeAraProjectEvent(event);
             }
 
             void audioSourceRemoved(const ProjectDocumentEvent& event) override {
-                (void) event;
-                resyncNativeAraDocuments();
+                applyNativeAraProjectEvent(event);
             }
 
             void audioSourceChanged(const ProjectDocumentEvent& event) override {
-                (void) event;
-                resyncNativeAraDocuments();
+                applyNativeAraProjectEvent(event);
             }
         };
     } // namespace

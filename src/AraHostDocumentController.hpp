@@ -23,6 +23,10 @@ namespace uapmd::ara {
         bool resyncFromProjectDocument(
             ProjectDocumentView& documentView,
             const TimelineFacade::MasterTrackSnapshot& masterTrackSnapshot);
+        bool applyProjectDocumentEvent(
+            ProjectDocumentView& documentView,
+            const TimelineFacade::MasterTrackSnapshot& masterTrackSnapshot,
+            const ProjectDocumentEvent& event);
         void notifyModelUpdates();
 
     private:

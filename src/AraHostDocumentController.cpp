@@ -4,6 +4,7 @@
 #include <cstring>
 #include <map>
 #include <memory>
+#include <optional>
 #include <vector>
 
 namespace uapmd::ara {
@@ -309,6 +310,8 @@ namespace uapmd::ara {
         std::map<ProjectObjectId, ARA::ARAAudioModificationRef> audio_modification_refs{};
         std::map<ProjectObjectId, HostPlaybackRegion> playback_region_hosts{};
         std::map<ProjectObjectId, ARA::ARAPlaybackRegionRef> playback_region_refs{};
+        std::map<ProjectObjectId, ProjectObjectId> playback_region_track_ids{};
+        std::map<ProjectObjectId, ProjectObjectId> playback_region_audio_source_ids{};
 
         explicit Impl(const ARA::ARAFactory& factory, std::string documentName)
             : factory(&factory), document_name(std::move(documentName)) {
@@ -424,6 +427,8 @@ namespace uapmd::ara {
                     controller->destroyPlaybackRegion(controller_instance->documentControllerRef, it->second);
             playback_region_refs.clear();
             playback_region_hosts.clear();
+            playback_region_track_ids.clear();
+            playback_region_audio_source_ids.clear();
 
             for (auto it = audio_modification_refs.rbegin(); it != audio_modification_refs.rend(); ++it)
                 if (controller->destroyAudioModification)
@@ -611,10 +616,376 @@ namespace uapmd::ara {
                             modificationIt->second,
                             reinterpret_cast<ARA::ARAPlaybackRegionHostRef>(&host),
                             &regionProperties);
+                    if (playback_region_refs.contains(clipId)) {
+                        playback_region_track_ids[clipId] = trackId;
+                        playback_region_audio_source_ids[clipId] = audioSourceId;
+                    }
                 }
             }
 
             endEditing();
+            notifyModelUpdates();
+            return true;
+        }
+
+        std::optional<ProjectObjectId> audioSourceIdForClip(ProjectDocumentView& view, const ProjectObjectId& clipId) {
+            for (const auto& audioSourceId : view.audioSourceIds()) {
+                auto source = view.getAudioSource(audioSourceId);
+                if (source && source->clipId == clipId)
+                    return audioSourceId;
+            }
+            return std::nullopt;
+        }
+
+        ARA::ARAMusicalContextProperties musicalContextProperties() const {
+            return ARA::ARAMusicalContextProperties{
+                .structSize = ARA::kARAMusicalContextPropertiesMinSize,
+                .name = musical_context_host.name.c_str(),
+                .orderIndex = 0,
+                .color = nullptr
+            };
+        }
+
+        ARA::ARARegionSequenceProperties regionSequenceProperties(const ProjectTrackSnapshot& track, HostRegionSequence& host) const {
+            return ARA::ARARegionSequenceProperties{
+                .structSize = ARA::kARARegionSequencePropertiesMinSize,
+                .name = host.name.c_str(),
+                .orderIndex = track.trackIndex,
+                .musicalContextRef = musical_context_ref,
+                .color = nullptr,
+                .persistentID = host.persistent_id.c_str()
+            };
+        }
+
+        ARA::ARAAudioSourceProperties audioSourceProperties(const ProjectAudioSourceSnapshot& source, HostAudioSource& host) const {
+            return ARA::ARAAudioSourceProperties{
+                .structSize = ARA::kARAAudioSourcePropertiesMinSize,
+                .name = host.name.c_str(),
+                .persistentID = host.persistent_id.c_str(),
+                .sampleCount = source.frameCount,
+                .sampleRate = source.sampleRate,
+                .channelCount = static_cast<ARA::ARAChannelCount>(source.channelCount),
+                .merits64BitSamples = ARA::kARAFalse,
+                .channelArrangementDataType = ARA::kARAChannelArrangementUndefined,
+                .channelArrangement = nullptr
+            };
+        }
+
+        ARA::ARAAudioModificationProperties audioModificationProperties(HostAudioModification& host) const {
+            return ARA::ARAAudioModificationProperties{
+                .structSize = ARA::kARAAudioModificationPropertiesMinSize,
+                .name = host.name.c_str(),
+                .persistentID = host.persistent_id.c_str()
+            };
+        }
+
+        std::optional<ARA::ARAPlaybackRegionProperties> playbackRegionProperties(
+            ProjectDocumentView& view,
+            const ProjectClipSnapshot& clip,
+            HostPlaybackRegion& host,
+            ARA::ARARegionSequenceRef regionSequenceRef) {
+            auto audioSourceId = audioSourceIdForClip(view, clip.clipId);
+            if (!audioSourceId)
+                return std::nullopt;
+
+            auto source = view.getAudioSource(*audioSourceId);
+            const auto sourceSampleRate = source && source->sampleRate > 0 ? source->sampleRate : 48000.0;
+            return ARA::ARAPlaybackRegionProperties{
+                .structSize = ARA::kARAPlaybackRegionPropertiesMinSize,
+                .transformationFlags = ARA::kARAPlaybackTransformationNoChanges,
+                .startInModificationTime = 0.0,
+                .durationInModificationTime = secondsFromSamples(clip.durationSamples, sourceSampleRate),
+                .startInPlaybackTime = secondsFromSamples(clip.position.samples, sourceSampleRate),
+                .durationInPlaybackTime = secondsFromSamples(clip.durationSamples, sourceSampleRate),
+                .musicalContextRef = musical_context_ref,
+                .regionSequenceRef = regionSequenceRef,
+                .name = host.name.c_str(),
+                .color = nullptr
+            };
+        }
+
+        bool createOrUpdateRegionSequence(ProjectDocumentView& view, const ProjectObjectId& trackId) {
+            auto* controller = controllerInterface();
+            auto track = view.getTrack(trackId);
+            if (!controller || !track || track->masterTrack)
+                return false;
+
+            auto& host = region_sequence_hosts[trackId];
+            host = HostRegionSequence{
+                .id = trackId,
+                .name = "Track " + std::to_string(track->trackIndex),
+                .persistent_id = "uapmd.track." + trackId
+            };
+            auto properties = regionSequenceProperties(*track, host);
+            auto existing = region_sequence_refs.find(trackId);
+            if (existing != region_sequence_refs.end()) {
+                if (controller->updateRegionSequenceProperties)
+                    controller->updateRegionSequenceProperties(
+                        controller_instance->documentControllerRef,
+                        existing->second,
+                        &properties);
+                return true;
+            }
+
+            if (!controller->createRegionSequence)
+                return false;
+            auto ref = controller->createRegionSequence(
+                controller_instance->documentControllerRef,
+                reinterpret_cast<ARA::ARARegionSequenceHostRef>(&host),
+                &properties);
+            if (!ref)
+                return false;
+            region_sequence_refs[trackId] = ref;
+            return true;
+        }
+
+        void destroyPlaybackRegion(const ProjectObjectId& clipId) {
+            auto* controller = controllerInterface();
+            auto it = playback_region_refs.find(clipId);
+            if (controller && it != playback_region_refs.end() && controller->destroyPlaybackRegion)
+                controller->destroyPlaybackRegion(controller_instance->documentControllerRef, it->second);
+            playback_region_refs.erase(clipId);
+            playback_region_hosts.erase(clipId);
+            playback_region_track_ids.erase(clipId);
+            playback_region_audio_source_ids.erase(clipId);
+        }
+
+        void destroyRegionSequence(const ProjectObjectId& trackId) {
+            std::vector<ProjectObjectId> clipIds;
+            for (const auto& [clipId, ownerTrackId] : playback_region_track_ids)
+                if (ownerTrackId == trackId)
+                    clipIds.push_back(clipId);
+            for (const auto& clipId : clipIds)
+                destroyPlaybackRegion(clipId);
+
+            auto* controller = controllerInterface();
+            auto it = region_sequence_refs.find(trackId);
+            if (controller && it != region_sequence_refs.end() && controller->destroyRegionSequence)
+                controller->destroyRegionSequence(controller_instance->documentControllerRef, it->second);
+            region_sequence_refs.erase(trackId);
+            region_sequence_hosts.erase(trackId);
+        }
+
+        bool createOrUpdateAudioSource(ProjectDocumentView& view, const ProjectObjectId& audioSourceId) {
+            auto* controller = controllerInterface();
+            auto source = view.getAudioSource(audioSourceId);
+            if (!controller || !source || source->frameCount <= 0 || source->channelCount == 0)
+                return false;
+
+            auto& host = audio_source_hosts[audioSourceId];
+            host = HostAudioSource{
+                .id = audioSourceId,
+                .name = source->filepath.empty() ? audioSourceId : source->filepath,
+                .persistent_id = "uapmd.audio-source." + audioSourceId
+            };
+            auto properties = audioSourceProperties(*source, host);
+            auto existing = audio_source_refs.find(audioSourceId);
+            if (existing != audio_source_refs.end()) {
+                if (controller->updateAudioSourceProperties)
+                    controller->updateAudioSourceProperties(
+                        controller_instance->documentControllerRef,
+                        existing->second,
+                        &properties);
+                if (controller->updateAudioSourceContent)
+                    controller->updateAudioSourceContent(
+                        controller_instance->documentControllerRef,
+                        existing->second,
+                        nullptr,
+                        ARA::kARAContentUpdateEverythingChanged);
+                return true;
+            }
+
+            if (!controller->createAudioSource)
+                return false;
+            auto sourceRef = controller->createAudioSource(
+                controller_instance->documentControllerRef,
+                reinterpret_cast<ARA::ARAAudioSourceHostRef>(&host),
+                &properties);
+            if (!sourceRef)
+                return false;
+            audio_source_refs[audioSourceId] = sourceRef;
+            if (controller->enableAudioSourceSamplesAccess)
+                controller->enableAudioSourceSamplesAccess(
+                    controller_instance->documentControllerRef,
+                    sourceRef,
+                    ARA::kARATrue);
+
+            const auto modificationId = "mod." + audioSourceId;
+            auto& modificationHost = audio_modification_hosts[modificationId];
+            modificationHost = HostAudioModification{
+                .id = modificationId,
+                .name = host.name,
+                .persistent_id = "uapmd.audio-modification." + audioSourceId
+            };
+            auto modificationProps = audioModificationProperties(modificationHost);
+            if (controller->createAudioModification)
+                audio_modification_refs[modificationId] = controller->createAudioModification(
+                    controller_instance->documentControllerRef,
+                    sourceRef,
+                    reinterpret_cast<ARA::ARAAudioModificationHostRef>(&modificationHost),
+                    &modificationProps);
+            return audio_modification_refs.contains(modificationId);
+        }
+
+        void destroyAudioSource(const ProjectObjectId& audioSourceId) {
+            std::vector<ProjectObjectId> clipIds;
+            for (const auto& [clipId, ownerAudioSourceId] : playback_region_audio_source_ids)
+                if (ownerAudioSourceId == audioSourceId)
+                    clipIds.push_back(clipId);
+            for (const auto& clipId : clipIds)
+                destroyPlaybackRegion(clipId);
+
+            auto* controller = controllerInterface();
+            const auto modificationId = "mod." + audioSourceId;
+            auto modificationIt = audio_modification_refs.find(modificationId);
+            if (controller && modificationIt != audio_modification_refs.end() && controller->destroyAudioModification)
+                controller->destroyAudioModification(controller_instance->documentControllerRef, modificationIt->second);
+            audio_modification_refs.erase(modificationId);
+            audio_modification_hosts.erase(modificationId);
+
+            auto sourceIt = audio_source_refs.find(audioSourceId);
+            if (controller && sourceIt != audio_source_refs.end() && controller->destroyAudioSource)
+                controller->destroyAudioSource(controller_instance->documentControllerRef, sourceIt->second);
+            audio_source_refs.erase(audioSourceId);
+            audio_source_hosts.erase(audioSourceId);
+        }
+
+        bool createOrUpdatePlaybackRegion(ProjectDocumentView& view, const ProjectObjectId& clipId) {
+            auto* controller = controllerInterface();
+            auto clip = view.getClip(clipId);
+            if (!controller || !clip || clip->clipType != ClipType::Audio)
+                return false;
+
+            if (!region_sequence_refs.contains(clip->trackId) &&
+                !createOrUpdateRegionSequence(view, clip->trackId))
+                return false;
+
+            auto audioSourceId = audioSourceIdForClip(view, clipId);
+            if (!audioSourceId)
+                return false;
+            if (!audio_modification_refs.contains("mod." + *audioSourceId) &&
+                !createOrUpdateAudioSource(view, *audioSourceId))
+                return false;
+
+            auto sequenceIt = region_sequence_refs.find(clip->trackId);
+            auto modificationIt = audio_modification_refs.find("mod." + *audioSourceId);
+            if (sequenceIt == region_sequence_refs.end() || modificationIt == audio_modification_refs.end())
+                return false;
+
+            auto& host = playback_region_hosts[clipId];
+            host = HostPlaybackRegion{
+                .id = clipId,
+                .name = clip->name.empty() ? clipId : clip->name
+            };
+            auto properties = playbackRegionProperties(view, *clip, host, sequenceIt->second);
+            if (!properties)
+                return false;
+
+            auto existing = playback_region_refs.find(clipId);
+            if (existing != playback_region_refs.end()) {
+                if (controller->updatePlaybackRegionProperties)
+                    controller->updatePlaybackRegionProperties(
+                        controller_instance->documentControllerRef,
+                        existing->second,
+                        &*properties);
+            } else {
+                if (!controller->createPlaybackRegion)
+                    return false;
+                auto ref = controller->createPlaybackRegion(
+                    controller_instance->documentControllerRef,
+                    modificationIt->second,
+                    reinterpret_cast<ARA::ARAPlaybackRegionHostRef>(&host),
+                    &*properties);
+                if (!ref)
+                    return false;
+                playback_region_refs[clipId] = ref;
+            }
+
+            playback_region_track_ids[clipId] = clip->trackId;
+            playback_region_audio_source_ids[clipId] = *audioSourceId;
+            return true;
+        }
+
+        bool updateMusicalContextContent(const TimelineFacade::MasterTrackSnapshot& masterTrackSnapshot) {
+            auto* controller = controllerInterface();
+            if (!controller || !musical_context_ref)
+                return false;
+            master_track_snapshot = masterTrackSnapshot;
+            if (controller->updateMusicalContextProperties) {
+                auto properties = musicalContextProperties();
+                controller->updateMusicalContextProperties(
+                    controller_instance->documentControllerRef,
+                    musical_context_ref,
+                    &properties);
+            }
+            if (controller->updateMusicalContextContent)
+                controller->updateMusicalContextContent(
+                    controller_instance->documentControllerRef,
+                    musical_context_ref,
+                    nullptr,
+                    ARA::kARAContentUpdateEverythingChanged);
+            return true;
+        }
+
+        bool applyProjectDocumentEvent(
+            ProjectDocumentView& view,
+            const TimelineFacade::MasterTrackSnapshot& masterTrackSnapshot,
+            const ProjectDocumentEvent& event) {
+            if (!valid())
+                return false;
+            if (event.fullResyncRecommended())
+                return populateModel(view, masterTrackSnapshot);
+
+            document_view = &view;
+            bool handled = false;
+            beginEditing();
+            switch (event.kind()) {
+                case ProjectDocumentEventKind::MasterTrackChanged:
+                    handled = updateMusicalContextContent(masterTrackSnapshot);
+                    break;
+                case ProjectDocumentEventKind::TrackAdded:
+                case ProjectDocumentEventKind::TrackChanged:
+                    if (event.trackId())
+                        handled = createOrUpdateRegionSequence(view, *event.trackId());
+                    break;
+                case ProjectDocumentEventKind::TrackRemoved:
+                    if (event.trackId()) {
+                        destroyRegionSequence(*event.trackId());
+                        handled = true;
+                    }
+                    break;
+                case ProjectDocumentEventKind::AudioSourceAdded:
+                case ProjectDocumentEventKind::AudioSourceChanged:
+                    if (event.audioSourceId())
+                        handled = createOrUpdateAudioSource(view, *event.audioSourceId());
+                    break;
+                case ProjectDocumentEventKind::AudioSourceRemoved:
+                    if (event.audioSourceId()) {
+                        destroyAudioSource(*event.audioSourceId());
+                        handled = true;
+                    }
+                    break;
+                case ProjectDocumentEventKind::ClipAdded:
+                case ProjectDocumentEventKind::ClipChanged:
+                    if (event.clipId())
+                        handled = createOrUpdatePlaybackRegion(view, *event.clipId());
+                    break;
+                case ProjectDocumentEventKind::ClipRemoved:
+                    if (event.clipId()) {
+                        destroyPlaybackRegion(*event.clipId());
+                        handled = true;
+                    }
+                    break;
+                case ProjectDocumentEventKind::ProjectLoaded:
+                case ProjectDocumentEventKind::ProjectClosing:
+                case ProjectDocumentEventKind::ProjectSaved:
+                case ProjectDocumentEventKind::PluginGraphChanged:
+                    break;
+            }
+            endEditing();
+
+            if (!handled)
+                return populateModel(view, masterTrackSnapshot);
             notifyModelUpdates();
             return true;
         }
@@ -915,6 +1286,15 @@ namespace uapmd::ara {
         if (!valid())
             return false;
         return impl_->populateModel(documentView, masterTrackSnapshot);
+    }
+
+    bool AraHostDocumentController::applyProjectDocumentEvent(
+        ProjectDocumentView& documentView,
+        const TimelineFacade::MasterTrackSnapshot& masterTrackSnapshot,
+        const ProjectDocumentEvent& event) {
+        if (!valid())
+            return false;
+        return impl_->applyProjectDocumentEvent(documentView, masterTrackSnapshot, event);
     }
 
     void AraHostDocumentController::notifyModelUpdates() {
