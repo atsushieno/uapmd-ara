@@ -13,13 +13,18 @@ namespace uapmd::ara {
         auto* native = nativeHandleExtension(pluginInstance);
         if (!native)
             return nullptr;
-
+#if ANDROID
+        // FIXME: implement
+        //if (auto binding = createAapAraBinding(*native))
+        //    return binding;
+#else
         if (auto binding = createVst3AraBinding(*native))
             return binding;
         if (auto binding = createClapAraBinding(*native))
             return binding;
         if (auto binding = createAudioUnitAraBinding(*native))
             return binding;
+#endif
         return nullptr;
     }
 

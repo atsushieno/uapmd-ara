@@ -14,14 +14,20 @@ if(NOT DEFINED vst3sdk_SOURCE_DIR AND DEFINED CPM_PACKAGE_vst3sdk_SOURCE_DIR)
     set(vst3sdk_SOURCE_DIR "${CPM_PACKAGE_vst3sdk_SOURCE_DIR}")
 endif()
 
+if (NOT ANDROID AND NOT EMSCRIPTEN)
+    set(UAPMD_ARA_SOURCES_DESKTOP
+            src/AraVst3.cpp
+            src/AraClap.cpp
+            src/AraAudioUnit.cpp
+    )
+endif ()
+
 add_library(uapmd-ara STATIC
         src/AraSupport.cpp
         src/AraSession.cpp
         src/AraHostDocumentController.cpp
         src/AraFormatBinding.cpp
-        src/AraVst3.cpp
-        src/AraClap.cpp
-        src/AraAudioUnit.cpp
+        ${UAPMD_ARA_SOURCES_DESKTOP}
 )
 add_library(uapmd::ara ALIAS uapmd-ara)
 
