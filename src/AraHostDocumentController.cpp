@@ -39,6 +39,13 @@ namespace uapmd::ara {
             bool use64BitSamples{};
         };
 
+        struct HostContentReader {
+            ARA::ARAContentType content_type{};
+            std::vector<ARA::ARAContentTempoEntry> tempo_entries{};
+            std::vector<ARA::ARAContentBarSignature> bar_signatures{};
+            std::vector<ARA::ARAContentTuning> tunings{};
+        };
+
         double secondsFromSamples(int64_t samples, double sampleRate) {
             if (sampleRate <= 0)
                 sampleRate = 48000.0;
@@ -51,6 +58,22 @@ namespace uapmd::ara {
             ARA::ARASamplePosition samplePosition,
             ARA::ARASampleCount samplesPerChannel,
             void* const buffers[]);
+
+        ARA::ARABool isMusicalContentAvailableFromImpl(
+            AraHostDocumentController::Impl* impl,
+            HostRegionSequence* musicalContextHost,
+            ARA::ARAContentType contentType);
+
+        ARA::ARAContentGrade getMusicalContentGradeFromImpl(
+            AraHostDocumentController::Impl* impl,
+            HostRegionSequence* musicalContextHost,
+            ARA::ARAContentType contentType);
+
+        ARA::ARAContentReaderHostRef createMusicalContentReaderFromImpl(
+            AraHostDocumentController::Impl* impl,
+            HostRegionSequence* musicalContextHost,
+            ARA::ARAContentType contentType,
+            const ARA::ARAContentTimeRange* range);
 
         ARA::ARAAudioReaderHostRef ARA_CALL createAudioReaderForSource(
             ARA::ARAAudioAccessControllerHostRef controllerHostRef,
@@ -85,6 +108,123 @@ namespace uapmd::ara {
             ARA::ARAAudioReaderHostRef audioReaderHostRef) {
             (void) controllerHostRef;
             delete reinterpret_cast<HostAudioReader*>(audioReaderHostRef);
+        }
+
+        ARA::ARABool ARA_CALL isMusicalContextContentAvailable(
+            ARA::ARAContentAccessControllerHostRef controllerHostRef,
+            ARA::ARAMusicalContextHostRef musicalContextHostRef,
+            ARA::ARAContentType contentType) {
+            return isMusicalContentAvailableFromImpl(
+                reinterpret_cast<AraHostDocumentController::Impl*>(controllerHostRef),
+                reinterpret_cast<HostRegionSequence*>(musicalContextHostRef),
+                contentType);
+        }
+
+        ARA::ARAContentGrade ARA_CALL getMusicalContextContentGrade(
+            ARA::ARAContentAccessControllerHostRef controllerHostRef,
+            ARA::ARAMusicalContextHostRef musicalContextHostRef,
+            ARA::ARAContentType contentType) {
+            return getMusicalContentGradeFromImpl(
+                reinterpret_cast<AraHostDocumentController::Impl*>(controllerHostRef),
+                reinterpret_cast<HostRegionSequence*>(musicalContextHostRef),
+                contentType);
+        }
+
+        ARA::ARAContentReaderHostRef ARA_CALL createMusicalContextContentReader(
+            ARA::ARAContentAccessControllerHostRef controllerHostRef,
+            ARA::ARAMusicalContextHostRef musicalContextHostRef,
+            ARA::ARAContentType contentType,
+            const ARA::ARAContentTimeRange* range) {
+            return createMusicalContentReaderFromImpl(
+                reinterpret_cast<AraHostDocumentController::Impl*>(controllerHostRef),
+                reinterpret_cast<HostRegionSequence*>(musicalContextHostRef),
+                contentType,
+                range);
+        }
+
+        ARA::ARABool ARA_CALL isAudioSourceContentAvailable(
+            ARA::ARAContentAccessControllerHostRef controllerHostRef,
+            ARA::ARAAudioSourceHostRef audioSourceHostRef,
+            ARA::ARAContentType contentType) {
+            (void) controllerHostRef;
+            (void) audioSourceHostRef;
+            (void) contentType;
+            return ARA::kARAFalse;
+        }
+
+        ARA::ARAContentGrade ARA_CALL getAudioSourceContentGrade(
+            ARA::ARAContentAccessControllerHostRef controllerHostRef,
+            ARA::ARAAudioSourceHostRef audioSourceHostRef,
+            ARA::ARAContentType contentType) {
+            (void) controllerHostRef;
+            (void) audioSourceHostRef;
+            (void) contentType;
+            return ARA::kARAContentGradeInitial;
+        }
+
+        ARA::ARAContentReaderHostRef ARA_CALL createAudioSourceContentReader(
+            ARA::ARAContentAccessControllerHostRef controllerHostRef,
+            ARA::ARAAudioSourceHostRef audioSourceHostRef,
+            ARA::ARAContentType contentType,
+            const ARA::ARAContentTimeRange* range) {
+            (void) controllerHostRef;
+            (void) audioSourceHostRef;
+            (void) contentType;
+            (void) range;
+            return nullptr;
+        }
+
+        ARA::ARAInt32 ARA_CALL getContentReaderEventCount(
+            ARA::ARAContentAccessControllerHostRef controllerHostRef,
+            ARA::ARAContentReaderHostRef contentReaderHostRef) {
+            (void) controllerHostRef;
+            auto* reader = reinterpret_cast<HostContentReader*>(contentReaderHostRef);
+            if (!reader)
+                return 0;
+            switch (reader->content_type) {
+                case ARA::kARAContentTypeTempoEntries:
+                    return static_cast<ARA::ARAInt32>(reader->tempo_entries.size());
+                case ARA::kARAContentTypeBarSignatures:
+                    return static_cast<ARA::ARAInt32>(reader->bar_signatures.size());
+                case ARA::kARAContentTypeStaticTuning:
+                    return static_cast<ARA::ARAInt32>(reader->tunings.size());
+                default:
+                    return 0;
+            }
+        }
+
+        const void* ARA_CALL getContentReaderDataForEvent(
+            ARA::ARAContentAccessControllerHostRef controllerHostRef,
+            ARA::ARAContentReaderHostRef contentReaderHostRef,
+            ARA::ARAInt32 eventIndex) {
+            (void) controllerHostRef;
+            auto* reader = reinterpret_cast<HostContentReader*>(contentReaderHostRef);
+            if (!reader || eventIndex < 0)
+                return nullptr;
+            const auto index = static_cast<size_t>(eventIndex);
+            switch (reader->content_type) {
+                case ARA::kARAContentTypeTempoEntries:
+                    if (index >= reader->tempo_entries.size())
+                        return nullptr;
+                    return &reader->tempo_entries[index];
+                case ARA::kARAContentTypeBarSignatures:
+                    if (index >= reader->bar_signatures.size())
+                        return nullptr;
+                    return &reader->bar_signatures[index];
+                case ARA::kARAContentTypeStaticTuning:
+                    if (index >= reader->tunings.size())
+                        return nullptr;
+                    return &reader->tunings[index];
+                default:
+                    return nullptr;
+            }
+        }
+
+        void ARA_CALL destroyContentReader(
+            ARA::ARAContentAccessControllerHostRef controllerHostRef,
+            ARA::ARAContentReaderHostRef contentReaderHostRef) {
+            (void) controllerHostRef;
+            delete reinterpret_cast<HostContentReader*>(contentReaderHostRef);
         }
 
         ARA::ARASize ARA_CALL getArchiveSize(
@@ -151,12 +291,14 @@ namespace uapmd::ara {
         std::string document_name;
         ARA::ARAInterfaceConfiguration interface_configuration{};
         ARA::ARAAudioAccessControllerInterface audio_access_interface{};
+        ARA::ARAContentAccessControllerInterface content_access_interface{};
         ARA::ARAArchivingControllerInterface archiving_interface{};
         ARA::ARADocumentControllerHostInstance host_instance{};
         ARA::ARADocumentProperties document_properties{};
         const ARA::ARADocumentControllerInstance* controller_instance{};
         bool initialized_factory{};
         ProjectDocumentView* document_view{};
+        TimelineFacade::MasterTrackSnapshot master_track_snapshot{};
         ARA::ARAMusicalContextRef musical_context_ref{};
         HostRegionSequence musical_context_host{};
         std::map<ProjectObjectId, HostRegionSequence> region_sequence_hosts{};
@@ -190,6 +332,18 @@ namespace uapmd::ara {
                 .readAudioSamples = readAudioSamples,
                 .destroyAudioReader = destroyAudioReader
             };
+            content_access_interface = ARA::ARAContentAccessControllerInterface{
+                .structSize = ARA::kARAContentAccessControllerInterfaceMinSize,
+                .isMusicalContextContentAvailable = isMusicalContextContentAvailable,
+                .getMusicalContextContentGrade = getMusicalContextContentGrade,
+                .createMusicalContextContentReader = createMusicalContextContentReader,
+                .isAudioSourceContentAvailable = isAudioSourceContentAvailable,
+                .getAudioSourceContentGrade = getAudioSourceContentGrade,
+                .createAudioSourceContentReader = createAudioSourceContentReader,
+                .getContentReaderEventCount = getContentReaderEventCount,
+                .getContentReaderDataForEvent = getContentReaderDataForEvent,
+                .destroyContentReader = destroyContentReader
+            };
             archiving_interface = ARA::ARAArchivingControllerInterface{
                 .structSize = ARA::kARAArchivingControllerInterfaceMinSize,
                 .getArchiveSize = getArchiveSize,
@@ -205,8 +359,8 @@ namespace uapmd::ara {
                 .audioAccessControllerInterface = &audio_access_interface,
                 .archivingControllerHostRef = reinterpret_cast<ARA::ARAArchivingControllerHostRef>(this),
                 .archivingControllerInterface = &archiving_interface,
-                .contentAccessControllerHostRef = nullptr,
-                .contentAccessControllerInterface = nullptr,
+                .contentAccessControllerHostRef = reinterpret_cast<ARA::ARAContentAccessControllerHostRef>(this),
+                .contentAccessControllerInterface = &content_access_interface,
                 .modelUpdateControllerHostRef = nullptr,
                 .modelUpdateControllerInterface = nullptr,
                 .playbackControllerHostRef = nullptr,
@@ -295,12 +449,15 @@ namespace uapmd::ara {
             musical_context_host = {};
         }
 
-        bool populateModel(ProjectDocumentView& view) {
+        bool populateModel(
+            ProjectDocumentView& view,
+            const TimelineFacade::MasterTrackSnapshot& masterTrackSnapshot) {
             auto* controller = controllerInterface();
             if (!controller)
                 return false;
 
             document_view = &view;
+            master_track_snapshot = masterTrackSnapshot;
             beginEditing();
             clearModel();
 
@@ -378,6 +535,11 @@ namespace uapmd::ara {
                 if (!sourceRef)
                     continue;
                 audio_source_refs[audioSourceId] = sourceRef;
+                if (controller->enableAudioSourceSamplesAccess)
+                    controller->enableAudioSourceSamplesAccess(
+                        controller_instance->documentControllerRef,
+                        sourceRef,
+                        ARA::kARATrue);
 
                 auto modificationId = "mod." + audioSourceId;
                 auto& modificationHost = audio_modification_hosts[modificationId];
@@ -459,6 +621,220 @@ namespace uapmd::ara {
     };
 
     namespace {
+        bool isSupportedMusicalContentType(ARA::ARAContentType contentType) {
+            return contentType == ARA::kARAContentTypeTempoEntries ||
+                contentType == ARA::kARAContentTypeBarSignatures ||
+                contentType == ARA::kARAContentTypeStaticTuning;
+        }
+
+        using TempoPoint = TimelineFacade::MasterTrackSnapshot::TempoPoint;
+        using TimeSignaturePoint = TimelineFacade::MasterTrackSnapshot::TimeSignaturePoint;
+
+        std::vector<TempoPoint> normalizedTempoPoints(const TimelineFacade::MasterTrackSnapshot& timeline) {
+            std::vector<TempoPoint> tempoPoints;
+            tempoPoints.reserve(timeline.tempoPoints.size() + 1);
+            for (const auto& point : timeline.tempoPoints)
+                if (point.bpm > 0.0)
+                    tempoPoints.push_back(point);
+            std::stable_sort(tempoPoints.begin(), tempoPoints.end(), [](const auto& a, const auto& b) {
+                return a.timeSeconds < b.timeSeconds;
+            });
+
+            if (tempoPoints.empty()) {
+                tempoPoints.push_back(TempoPoint{
+                    .timeSeconds = 0.0,
+                    .tickPosition = 0,
+                    .bpm = 120.0,
+                });
+                return tempoPoints;
+            }
+
+            if (tempoPoints.front().timeSeconds > 0.0)
+                tempoPoints.insert(
+                    tempoPoints.begin(),
+                    TempoPoint{
+                        .timeSeconds = 0.0,
+                        .tickPosition = 0,
+                        .bpm = tempoPoints.front().bpm,
+                    });
+            else
+                tempoPoints.front().timeSeconds = 0.0;
+
+            tempoPoints.erase(
+                std::unique(
+                    tempoPoints.begin(),
+                    tempoPoints.end(),
+                    [](const auto& a, const auto& b) {
+                        return a.timeSeconds == b.timeSeconds;
+                    }),
+                tempoPoints.end());
+            return tempoPoints;
+        }
+
+        std::vector<ARA::ARAContentTempoEntry> makeTempoEntries(const TimelineFacade::MasterTrackSnapshot& timeline) {
+            auto tempoPoints = normalizedTempoPoints(timeline);
+            std::vector<ARA::ARAContentTempoEntry> entries;
+            entries.reserve(tempoPoints.size() + 1);
+
+            double quarterPosition = 0.0;
+            double previousTime = tempoPoints.front().timeSeconds;
+            double previousBpm = tempoPoints.front().bpm > 0.0 ? tempoPoints.front().bpm : 120.0;
+
+            entries.push_back(ARA::ARAContentTempoEntry{
+                .timePosition = previousTime,
+                .quarterPosition = quarterPosition
+            });
+
+            for (size_t i = 1; i < tempoPoints.size(); i++) {
+                const auto& point = tempoPoints[i];
+                const auto deltaSeconds = std::max(0.0, point.timeSeconds - previousTime);
+                quarterPosition += deltaSeconds * previousBpm / 60.0;
+                entries.push_back(ARA::ARAContentTempoEntry{
+                    .timePosition = point.timeSeconds,
+                    .quarterPosition = quarterPosition
+                });
+                previousTime = point.timeSeconds;
+                previousBpm = point.bpm > 0.0 ? point.bpm : previousBpm;
+            }
+
+            const auto finalTime = std::max(timeline.maxTimeSeconds, previousTime + (240.0 / previousBpm));
+            const auto finalQuarter = quarterPosition + std::max(0.0, finalTime - previousTime) * previousBpm / 60.0;
+            if (entries.size() < 2 || finalTime > entries.back().timePosition)
+                entries.push_back(ARA::ARAContentTempoEntry{
+                    .timePosition = finalTime,
+                    .quarterPosition = finalQuarter
+                });
+
+            return entries;
+        }
+
+        double quarterPositionAtTime(
+            const std::vector<ARA::ARAContentTempoEntry>& entries,
+            double timeSeconds) {
+            if (entries.empty())
+                return timeSeconds * 2.0;
+            if (entries.size() == 1)
+                return entries.front().quarterPosition + (timeSeconds - entries.front().timePosition) * 2.0;
+
+            for (size_t i = 1; i < entries.size(); i++) {
+                if (timeSeconds <= entries[i].timePosition) {
+                    const auto& left = entries[i - 1];
+                    const auto& right = entries[i];
+                    const auto duration = right.timePosition - left.timePosition;
+                    if (duration <= 0.0)
+                        return left.quarterPosition;
+                    const auto ratio = (timeSeconds - left.timePosition) / duration;
+                    return left.quarterPosition + (right.quarterPosition - left.quarterPosition) * ratio;
+                }
+            }
+
+            const auto& left = entries[entries.size() - 2];
+            const auto& right = entries[entries.size() - 1];
+            const auto duration = right.timePosition - left.timePosition;
+            const auto quarters = right.quarterPosition - left.quarterPosition;
+            const auto quartersPerSecond = duration > 0.0 ? quarters / duration : 2.0;
+            return right.quarterPosition + (timeSeconds - right.timePosition) * quartersPerSecond;
+        }
+
+        std::vector<ARA::ARAContentBarSignature> makeBarSignatures(
+            const TimelineFacade::MasterTrackSnapshot& timeline,
+            const std::vector<ARA::ARAContentTempoEntry>& tempoEntries) {
+            std::vector<TimeSignaturePoint> signaturePoints = timeline.timeSignaturePoints;
+            std::stable_sort(signaturePoints.begin(), signaturePoints.end(), [](const auto& a, const auto& b) {
+                return a.timeSeconds < b.timeSeconds;
+            });
+
+            if (signaturePoints.empty())
+                signaturePoints.push_back(TimeSignaturePoint{
+                    .timeSeconds = 0.0,
+                    .tickPosition = 0,
+                    .signature = MidiTimeSignatureChange{}
+                });
+            if (signaturePoints.front().timeSeconds > 0.0)
+                signaturePoints.insert(
+                    signaturePoints.begin(),
+                    TimeSignaturePoint{
+                        .timeSeconds = 0.0,
+                        .tickPosition = 0,
+                        .signature = signaturePoints.front().signature
+                    });
+            else
+                signaturePoints.front().timeSeconds = 0.0;
+
+            std::vector<ARA::ARAContentBarSignature> result;
+            result.reserve(signaturePoints.size());
+            for (const auto& signature : signaturePoints) {
+                const auto numerator = signature.signature.numerator > 0 ? signature.signature.numerator : 4;
+                const auto denominator = signature.signature.denominator > 0 ? signature.signature.denominator : 4;
+                result.push_back(ARA::ARAContentBarSignature{
+                    .numerator = static_cast<ARA::ARAInt32>(numerator),
+                    .denominator = static_cast<ARA::ARAInt32>(denominator),
+                    .position = quarterPositionAtTime(tempoEntries, signature.timeSeconds)
+                });
+            }
+            return result;
+        }
+
+        ARA::ARABool isMusicalContentAvailableFromImpl(
+            AraHostDocumentController::Impl* impl,
+            HostRegionSequence* musicalContextHost,
+            ARA::ARAContentType contentType) {
+            if (!impl || !impl->document_view || !musicalContextHost || musicalContextHost != &impl->musical_context_host)
+                return ARA::kARAFalse;
+            return isSupportedMusicalContentType(contentType) ? ARA::kARATrue : ARA::kARAFalse;
+        }
+
+        ARA::ARAContentGrade getMusicalContentGradeFromImpl(
+            AraHostDocumentController::Impl* impl,
+            HostRegionSequence* musicalContextHost,
+            ARA::ARAContentType contentType) {
+            if (!isMusicalContentAvailableFromImpl(impl, musicalContextHost, contentType))
+                return ARA::kARAContentGradeInitial;
+            if (contentType == ARA::kARAContentTypeStaticTuning)
+                return ARA::kARAContentGradeInitial;
+            if (contentType == ARA::kARAContentTypeTempoEntries && impl->master_track_snapshot.tempoPoints.empty())
+                return ARA::kARAContentGradeInitial;
+            if (contentType == ARA::kARAContentTypeBarSignatures && impl->master_track_snapshot.timeSignaturePoints.empty())
+                return ARA::kARAContentGradeInitial;
+            return ARA::kARAContentGradeAdjusted;
+        }
+
+        ARA::ARAContentReaderHostRef createMusicalContentReaderFromImpl(
+            AraHostDocumentController::Impl* impl,
+            HostRegionSequence* musicalContextHost,
+            ARA::ARAContentType contentType,
+            const ARA::ARAContentTimeRange* range) {
+            (void) range;
+            if (!isMusicalContentAvailableFromImpl(impl, musicalContextHost, contentType))
+                return nullptr;
+
+            auto reader = std::make_unique<HostContentReader>();
+            reader->content_type = contentType;
+            switch (contentType) {
+                case ARA::kARAContentTypeTempoEntries:
+                    reader->tempo_entries = makeTempoEntries(impl->master_track_snapshot);
+                    break;
+                case ARA::kARAContentTypeBarSignatures: {
+                    auto tempoEntries = makeTempoEntries(impl->master_track_snapshot);
+                    reader->bar_signatures = makeBarSignatures(impl->master_track_snapshot, tempoEntries);
+                    break;
+                }
+                case ARA::kARAContentTypeStaticTuning: {
+                    ARA::ARAContentTuning tuning{
+                        .concertPitchFrequency = ARA::kARADefaultConcertPitchFrequency,
+                        .root = 0,
+                        .tunings = {},
+                        .name = "Equal temperament"
+                    };
+                    reader->tunings.push_back(tuning);
+                    break;
+                }
+                default:
+                    return nullptr;
+            }
+            return reinterpret_cast<ARA::ARAContentReaderHostRef>(reader.release());
+        }
+
         ARA::ARABool readAudioSamplesFromImpl(
             AraHostDocumentController::Impl* impl,
             HostAudioReader* reader,
@@ -533,10 +909,12 @@ namespace uapmd::ara {
         return impl_ ? impl_->factory : nullptr;
     }
 
-    bool AraHostDocumentController::resyncFromProjectDocument(ProjectDocumentView& documentView) {
+    bool AraHostDocumentController::resyncFromProjectDocument(
+        ProjectDocumentView& documentView,
+        const TimelineFacade::MasterTrackSnapshot& masterTrackSnapshot) {
         if (!valid())
             return false;
-        return impl_->populateModel(documentView);
+        return impl_->populateModel(documentView, masterTrackSnapshot);
     }
 
     void AraHostDocumentController::notifyModelUpdates() {

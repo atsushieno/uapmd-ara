@@ -25,10 +25,13 @@ namespace uapmd::ara {
             std::map<int32_t, NativeAraDocument> native_ara_documents_{};
 
             void resyncNativeAraDocuments() {
+                auto masterTrackSnapshot = engine_.timeline().buildMasterTrackSnapshot();
                 for (auto& [pluginInstanceId, document] : native_ara_documents_) {
                     (void) pluginInstanceId;
                     if (document.controller)
-                        document.controller->resyncFromProjectDocument(engine_.timeline().projectDocumentView());
+                        document.controller->resyncFromProjectDocument(
+                            engine_.timeline().projectDocumentView(),
+                            masterTrackSnapshot);
                 }
             }
 
@@ -81,7 +84,9 @@ namespace uapmd::ara {
                 if (!controller->valid())
                     return AraStatus::BackendError;
 
-                if (!controller->resyncFromProjectDocument(engine_.timeline().projectDocumentView()))
+                if (!controller->resyncFromProjectDocument(
+                        engine_.timeline().projectDocumentView(),
+                        engine_.timeline().buildMasterTrackSnapshot()))
                     return AraStatus::BackendError;
 
                 const auto knownRoles =

@@ -3,7 +3,7 @@
 #include <string>
 
 #include <ARA_API/ARAInterface.h>
-#include <uapmd-data/uapmd-data.hpp>
+#include <uapmd-engine/uapmd-engine.hpp>
 
 namespace uapmd::ara {
 
@@ -20,7 +20,9 @@ namespace uapmd::ara {
         bool valid() const;
         ARA::ARADocumentControllerRef documentControllerRef() const;
         const ARA::ARAFactory* factory() const;
-        bool resyncFromProjectDocument(ProjectDocumentView& documentView);
+        bool resyncFromProjectDocument(
+            ProjectDocumentView& documentView,
+            const TimelineFacade::MasterTrackSnapshot& masterTrackSnapshot);
         void notifyModelUpdates();
 
     private:
