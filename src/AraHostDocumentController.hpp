@@ -1,9 +1,12 @@
 #pragma once
 
 #include <string>
+#include <vector>
 
 #include <ARA_API/ARAInterface.h>
 #include <uapmd-engine/uapmd-engine.hpp>
+
+#include "uapmd-ara/uapmd-ara.hpp"
 
 namespace uapmd::ara {
 
@@ -27,6 +30,10 @@ namespace uapmd::ara {
             ProjectDocumentView& documentView,
             const TimelineFacade::MasterTrackSnapshot& masterTrackSnapshot,
             const ProjectDocumentEvent& event);
+        AraRequestId requestAnalysis(AraAnalysisRequest request, AraAnalysisCallback callback);
+        void cancelAnalysis(AraRequestId requestId);
+        bool saveArchiveState(std::vector<uint8_t>& archive);
+        bool loadArchiveState(const std::vector<uint8_t>& archive);
         void notifyModelUpdates();
 
     private:

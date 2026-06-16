@@ -138,6 +138,11 @@ namespace uapmd::ara {
             ARA::ARADocumentControllerRef documentControllerRef,
             ARA::ARAPlugInInstanceRoleFlags knownRoles,
             ARA::ARAPlugInInstanceRoleFlags assignedRoles) = 0;
+        virtual AraRequestId requestAnalysis(
+            int32_t pluginInstanceId,
+            AraAnalysisRequest request,
+            AraAnalysisCallback callback) = 0;
+        virtual void cancelAnalysis(int32_t pluginInstanceId, AraRequestId requestId) = 0;
     };
 
     std::unique_ptr<AraSupport> createAraSupport(SequencerEngine& engine);

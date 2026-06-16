@@ -3,15 +3,30 @@
 #include "AraFormatBinding.hpp"
 #include "AraHostDocumentController.hpp"
 
+#include <filesystem>
+#include <format>
 #include <map>
+#include <sstream>
 #include <stdexcept>
 
 namespace uapmd::ara {
 
     namespace {
+        constexpr std::string_view kAraProjectSerializationExtensionId =
+            "dev.atsushieno.uapmd.ara.state.v1";
+
+        std::vector<uint8_t> bytesFromString(const std::string& value) {
+            return std::vector<uint8_t>(value.begin(), value.end());
+        }
+
+        std::string stringFromBytes(const std::vector<uint8_t>& bytes) {
+            return std::string(bytes.begin(), bytes.end());
+        }
+
         class AraSupportImpl final
             : public AraSupport
-            , public ProjectDocumentEventListener {
+            , public ProjectDocumentEventListener
+            , public ProjectSerializationExtension {
             struct NativeAraDocument {
                 std::unique_ptr<AraFormatBinding> binding{};
                 std::unique_ptr<AraHostDocumentController> controller{};
@@ -23,6 +38,7 @@ namespace uapmd::ara {
             ProjectDocumentEventSource* event_source_{};
             ProjectDocumentEventListenerToken event_listener_token_{};
             std::map<int32_t, NativeAraDocument> native_ara_documents_{};
+            std::map<int32_t, std::vector<uint8_t>> pending_native_archives_{};
 
             void resyncNativeAraDocuments() {
                 auto masterTrackSnapshot = engine_.timeline().buildMasterTrackSnapshot();
@@ -60,6 +76,7 @@ namespace uapmd::ara {
                 if (status != AraStatus::Ok)
                     throw std::runtime_error("Failed to bind ARA session to project document.");
 
+                engine_.timeline().addProjectSerializationExtension(*this);
                 event_source_ = &engine_.timeline().projectDocumentEvents();
                 event_listener_token_ = event_source_->addProjectDocumentEventListener(*this);
             }
@@ -67,6 +84,7 @@ namespace uapmd::ara {
             ~AraSupportImpl() override {
                 if (event_source_ && event_listener_token_ != 0)
                     event_source_->removeProjectDocumentEventListener(event_listener_token_);
+                engine_.timeline().removeProjectSerializationExtension(*this);
                 if (session_)
                     session_->unbindProjectDocument();
             }
@@ -100,6 +118,12 @@ namespace uapmd::ara {
                         engine_.timeline().projectDocumentView(),
                         engine_.timeline().buildMasterTrackSnapshot()))
                     return AraStatus::BackendError;
+
+                if (auto pendingIt = pending_native_archives_.find(pluginInstanceId); pendingIt != pending_native_archives_.end()) {
+                    if (!controller->loadArchiveState(pendingIt->second))
+                        return AraStatus::BackendError;
+                    pending_native_archives_.erase(pendingIt);
+                }
 
                 const auto knownRoles =
                     ARA::kARAPlaybackRendererRole |
@@ -149,6 +173,120 @@ namespace uapmd::ara {
                 if (!documentControllerRef)
                     return it->second.plugin_extension;
                 return it->second.binding->bindToDocumentController(documentControllerRef, knownRoles, assignedRoles);
+            }
+
+            AraRequestId requestAnalysis(
+                int32_t pluginInstanceId,
+                AraAnalysisRequest request,
+                AraAnalysisCallback callback) override {
+                auto nativeIt = native_ara_documents_.find(pluginInstanceId);
+                if (nativeIt != native_ara_documents_.end() && nativeIt->second.controller)
+                    return nativeIt->second.controller->requestAnalysis(
+                        std::move(request),
+                        std::move(callback));
+
+                auto* document = session_->pluginDocument(pluginInstanceId);
+                if (!document)
+                    return 0;
+                return document->requestAnalysis(std::move(request), std::move(callback));
+            }
+
+            void cancelAnalysis(int32_t pluginInstanceId, AraRequestId requestId) override {
+                auto nativeIt = native_ara_documents_.find(pluginInstanceId);
+                if (nativeIt != native_ara_documents_.end() && nativeIt->second.controller) {
+                    nativeIt->second.controller->cancelAnalysis(requestId);
+                    return;
+                }
+
+                auto* document = session_->pluginDocument(pluginInstanceId);
+                if (document)
+                    document->cancelAnalysis(requestId);
+            }
+
+            std::string_view extensionId() const override {
+                return kAraProjectSerializationExtensionId;
+            }
+
+            bool saveProjectExtensionData(
+                ProjectSerializationWriteContext& context,
+                std::string& error) override {
+                std::ostringstream manifest;
+                manifest << "uapmd-ara-state-v1\n";
+
+                for (auto& [pluginInstanceId, document] : native_ara_documents_) {
+                    if (!document.controller)
+                        continue;
+
+                    std::vector<uint8_t> archive;
+                    if (!document.controller->saveArchiveState(archive)) {
+                        error = std::format("Failed to archive native ARA document for plugin instance {}.", pluginInstanceId);
+                        return false;
+                    }
+                    if (archive.empty())
+                        continue;
+
+                    const auto archivePath = std::filesystem::path("native") / (std::to_string(pluginInstanceId) + ".bin");
+                    if (!context.writeExtensionFile(extensionId(), archivePath, archive, error))
+                        return false;
+                    manifest << "native " << pluginInstanceId << " " << archivePath.generic_string() << "\n";
+                }
+
+                return context.writeExtensionFile(
+                    extensionId(),
+                    "manifest.txt",
+                    bytesFromString(manifest.str()),
+                    error);
+            }
+
+            bool loadProjectExtensionData(
+                ProjectSerializationReadContext& context,
+                std::string& error) override {
+                pending_native_archives_.clear();
+
+                auto manifestBytes = context.readExtensionFile(extensionId(), "manifest.txt", error);
+                if (!manifestBytes) {
+                    error.clear();
+                    return true;
+                }
+
+                std::istringstream manifest(stringFromBytes(*manifestBytes));
+                std::string header;
+                std::getline(manifest, header);
+                if (header != "uapmd-ara-state-v1") {
+                    error = "Unsupported ARA extension manifest.";
+                    return false;
+                }
+
+                std::string kind;
+                while (manifest >> kind) {
+                    if (kind != "native") {
+                        error = "Unsupported ARA extension manifest entry.";
+                        return false;
+                    }
+
+                    int32_t pluginInstanceId{};
+                    std::string archivePath;
+                    if (!(manifest >> pluginInstanceId >> archivePath)) {
+                        error = "Malformed ARA extension manifest entry.";
+                        return false;
+                    }
+
+                    auto archiveBytes = context.readExtensionFile(extensionId(), archivePath, error);
+                    if (!archiveBytes)
+                        return false;
+
+                    auto documentIt = native_ara_documents_.find(pluginInstanceId);
+                    if (documentIt != native_ara_documents_.end() && documentIt->second.controller) {
+                        if (!documentIt->second.controller->loadArchiveState(*archiveBytes)) {
+                            error = std::format("Failed to restore native ARA document for plugin instance {}.", pluginInstanceId);
+                            return false;
+                        }
+                    } else {
+                        pending_native_archives_[pluginInstanceId] = std::move(*archiveBytes);
+                    }
+                }
+
+                return true;
             }
 
             void projectLoaded(const ProjectDocumentEvent& event) override {

@@ -5,6 +5,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <string>
 #include <vector>
 
 namespace uapmd::ara {
@@ -47,6 +48,19 @@ namespace uapmd::ara {
             std::vector<ARA::ARAContentTuning> tunings{};
         };
 
+        struct HostArchive {
+            const std::vector<uint8_t>* read_data{};
+            std::vector<uint8_t>* write_data{};
+            std::string archive_id{"uapmd-ara-document"};
+        };
+
+        struct PendingAnalysisRequest {
+            ProjectObjectId audio_source_id;
+            std::vector<AraContentKind> requested_kinds{};
+            std::vector<ARA::ARAContentType> content_types{};
+            AraAnalysisCallback callback{};
+        };
+
         double secondsFromSamples(int64_t samples, double sampleRate) {
             if (sampleRate <= 0)
                 sampleRate = 48000.0;
@@ -75,6 +89,16 @@ namespace uapmd::ara {
             HostRegionSequence* musicalContextHost,
             ARA::ARAContentType contentType,
             const ARA::ARAContentTimeRange* range);
+
+        void notifyAudioSourceAnalysisProgressFromImpl(
+            AraHostDocumentController::Impl* impl,
+            HostAudioSource* audioSourceHost,
+            ARA::ARAAnalysisProgressState state,
+            float value);
+
+        void notifyAudioSourceContentChangedFromImpl(
+            AraHostDocumentController::Impl* impl,
+            HostAudioSource* audioSourceHost);
 
         ARA::ARAAudioReaderHostRef ARA_CALL createAudioReaderForSource(
             ARA::ARAAudioAccessControllerHostRef controllerHostRef,
@@ -232,8 +256,10 @@ namespace uapmd::ara {
             ARA::ARAArchivingControllerHostRef controllerHostRef,
             ARA::ARAArchiveReaderHostRef archiveReaderHostRef) {
             (void) controllerHostRef;
-            (void) archiveReaderHostRef;
-            return 0;
+            auto* archive = reinterpret_cast<HostArchive*>(archiveReaderHostRef);
+            if (!archive || !archive->read_data)
+                return 0;
+            return static_cast<ARA::ARASize>(archive->read_data->size());
         }
 
         ARA::ARABool ARA_CALL readBytesFromArchive(
@@ -243,11 +269,16 @@ namespace uapmd::ara {
             ARA::ARASize length,
             ARA::ARAByte buffer[]) {
             (void) controllerHostRef;
-            (void) archiveReaderHostRef;
-            (void) position;
-            (void) length;
-            (void) buffer;
-            return ARA::kARAFalse;
+            auto* archive = reinterpret_cast<HostArchive*>(archiveReaderHostRef);
+            if (!archive || !archive->read_data || !buffer)
+                return ARA::kARAFalse;
+            const auto start = static_cast<size_t>(position);
+            const auto size = static_cast<size_t>(length);
+            if (start > archive->read_data->size() || size > archive->read_data->size() - start)
+                return ARA::kARAFalse;
+            if (size > 0)
+                std::memcpy(buffer, archive->read_data->data() + start, size);
+            return ARA::kARATrue;
         }
 
         ARA::ARABool ARA_CALL writeBytesToArchive(
@@ -257,11 +288,19 @@ namespace uapmd::ara {
             ARA::ARASize length,
             const ARA::ARAByte buffer[]) {
             (void) controllerHostRef;
-            (void) archiveWriterHostRef;
-            (void) position;
-            (void) length;
-            (void) buffer;
-            return ARA::kARAFalse;
+            auto* archive = reinterpret_cast<HostArchive*>(archiveWriterHostRef);
+            if (!archive || !archive->write_data || (!buffer && length > 0))
+                return ARA::kARAFalse;
+            const auto start = static_cast<size_t>(position);
+            const auto size = static_cast<size_t>(length);
+            if (start > archive->write_data->max_size() || size > archive->write_data->max_size() - start)
+                return ARA::kARAFalse;
+            const auto requiredSize = start + size;
+            if (archive->write_data->size() < requiredSize)
+                archive->write_data->resize(requiredSize);
+            if (size > 0)
+                std::memcpy(archive->write_data->data() + start, buffer, size);
+            return ARA::kARATrue;
         }
 
         void ARA_CALL notifyDocumentArchivingProgress(
@@ -282,8 +321,68 @@ namespace uapmd::ara {
             ARA::ARAArchivingControllerHostRef controllerHostRef,
             ARA::ARAArchiveReaderHostRef archiveReaderHostRef) {
             (void) controllerHostRef;
-            (void) archiveReaderHostRef;
-            return nullptr;
+            auto* archive = reinterpret_cast<HostArchive*>(archiveReaderHostRef);
+            if (!archive || archive->archive_id.empty())
+                return nullptr;
+            return archive->archive_id.c_str();
+        }
+
+        void ARA_CALL notifyAudioSourceAnalysisProgress(
+            ARA::ARAModelUpdateControllerHostRef controllerHostRef,
+            ARA::ARAAudioSourceHostRef audioSourceHostRef,
+            ARA::ARAAnalysisProgressState state,
+            float value) {
+            notifyAudioSourceAnalysisProgressFromImpl(
+                reinterpret_cast<AraHostDocumentController::Impl*>(controllerHostRef),
+                reinterpret_cast<HostAudioSource*>(audioSourceHostRef),
+                state,
+                value);
+        }
+
+        void ARA_CALL notifyAudioSourceContentChanged(
+            ARA::ARAModelUpdateControllerHostRef controllerHostRef,
+            ARA::ARAAudioSourceHostRef audioSourceHostRef,
+            const ARA::ARAContentTimeRange* range,
+            ARA::ARAContentUpdateFlags flags) {
+            (void) range;
+            (void) flags;
+            notifyAudioSourceContentChangedFromImpl(
+                reinterpret_cast<AraHostDocumentController::Impl*>(controllerHostRef),
+                reinterpret_cast<HostAudioSource*>(audioSourceHostRef));
+        }
+
+        void ARA_CALL notifyAudioModificationContentChanged(
+            ARA::ARAModelUpdateControllerHostRef controllerHostRef,
+            ARA::ARAAudioModificationHostRef audioModificationHostRef,
+            const ARA::ARAContentTimeRange* range,
+            ARA::ARAContentUpdateFlags flags) {
+            (void) controllerHostRef;
+            (void) audioModificationHostRef;
+            (void) range;
+            (void) flags;
+        }
+
+        void ARA_CALL notifyPlaybackRegionContentChanged(
+            ARA::ARAModelUpdateControllerHostRef controllerHostRef,
+            ARA::ARAPlaybackRegionHostRef playbackRegionHostRef,
+            const ARA::ARAContentTimeRange* range,
+            ARA::ARAContentUpdateFlags flags) {
+            (void) controllerHostRef;
+            (void) playbackRegionHostRef;
+            (void) range;
+            (void) flags;
+        }
+
+        void ARA_CALL notifyDocumentDataChanged(
+            ARA::ARAModelUpdateControllerHostRef controllerHostRef) {
+            (void) controllerHostRef;
+        }
+
+        void ARA_CALL notifyRegionSequenceDataChanged(
+            ARA::ARAModelUpdateControllerHostRef controllerHostRef,
+            ARA::ARARegionSequenceHostRef regionSequenceHostRef) {
+            (void) controllerHostRef;
+            (void) regionSequenceHostRef;
         }
     } // namespace
 
@@ -294,6 +393,7 @@ namespace uapmd::ara {
         ARA::ARAAudioAccessControllerInterface audio_access_interface{};
         ARA::ARAContentAccessControllerInterface content_access_interface{};
         ARA::ARAArchivingControllerInterface archiving_interface{};
+        ARA::ARAModelUpdateControllerInterface model_update_interface{};
         ARA::ARADocumentControllerHostInstance host_instance{};
         ARA::ARADocumentProperties document_properties{};
         const ARA::ARADocumentControllerInstance* controller_instance{};
@@ -312,6 +412,8 @@ namespace uapmd::ara {
         std::map<ProjectObjectId, ARA::ARAPlaybackRegionRef> playback_region_refs{};
         std::map<ProjectObjectId, ProjectObjectId> playback_region_track_ids{};
         std::map<ProjectObjectId, ProjectObjectId> playback_region_audio_source_ids{};
+        std::map<AraRequestId, PendingAnalysisRequest> pending_analysis_requests{};
+        AraRequestId next_analysis_request_id{1};
 
         explicit Impl(const ARA::ARAFactory& factory, std::string documentName)
             : factory(&factory), document_name(std::move(documentName)) {
@@ -356,6 +458,15 @@ namespace uapmd::ara {
                 .notifyDocumentUnarchivingProgress = notifyDocumentUnarchivingProgress,
                 .getDocumentArchiveID = getDocumentArchiveID
             };
+            model_update_interface = ARA::ARAModelUpdateControllerInterface{
+                .structSize = sizeof(ARA::ARAModelUpdateControllerInterface),
+                .notifyAudioSourceAnalysisProgress = notifyAudioSourceAnalysisProgress,
+                .notifyAudioSourceContentChanged = notifyAudioSourceContentChanged,
+                .notifyAudioModificationContentChanged = notifyAudioModificationContentChanged,
+                .notifyPlaybackRegionContentChanged = notifyPlaybackRegionContentChanged,
+                .notifyDocumentDataChanged = notifyDocumentDataChanged,
+                .notifyRegionSequenceDataChanged = notifyRegionSequenceDataChanged
+            };
             host_instance = ARA::ARADocumentControllerHostInstance{
                 .structSize = ARA::kARADocumentControllerHostInstanceMinSize,
                 .audioAccessControllerHostRef = reinterpret_cast<ARA::ARAAudioAccessControllerHostRef>(this),
@@ -364,8 +475,8 @@ namespace uapmd::ara {
                 .archivingControllerInterface = &archiving_interface,
                 .contentAccessControllerHostRef = reinterpret_cast<ARA::ARAContentAccessControllerHostRef>(this),
                 .contentAccessControllerInterface = &content_access_interface,
-                .modelUpdateControllerHostRef = nullptr,
-                .modelUpdateControllerInterface = nullptr,
+                .modelUpdateControllerHostRef = reinterpret_cast<ARA::ARAModelUpdateControllerHostRef>(this),
+                .modelUpdateControllerInterface = &model_update_interface,
                 .playbackControllerHostRef = nullptr,
                 .playbackControllerInterface = nullptr
             };
@@ -989,6 +1100,232 @@ namespace uapmd::ara {
             notifyModelUpdates();
             return true;
         }
+
+        std::optional<ARA::ARAContentType> araContentTypeForKind(AraContentKind kind) const {
+            switch (kind) {
+                case AraContentKind::Notes:
+                    return ARA::kARAContentTypeNotes;
+                case AraContentKind::TempoMap:
+                    return ARA::kARAContentTypeTempoEntries;
+                case AraContentKind::TimeSignatures:
+                    return ARA::kARAContentTypeBarSignatures;
+                case AraContentKind::Keys:
+                    return ARA::kARAContentTypeKeySignatures;
+                case AraContentKind::Chords:
+                    return ARA::kARAContentTypeSheetChords;
+                case AraContentKind::Lyrics:
+                    return ARA::kARAContentTypeLyricEntries;
+                default:
+                    return std::nullopt;
+            }
+        }
+
+        bool factoryCanAnalyze(ARA::ARAContentType contentType) const {
+            if (!factory)
+                return false;
+            for (ARA::ARASize i = 0; i < factory->analyzeableContentTypesCount; i++)
+                if (factory->analyzeableContentTypes && factory->analyzeableContentTypes[i] == contentType)
+                    return true;
+            return false;
+        }
+
+        bool analysisIncomplete(ARA::ARAAudioSourceRef audioSourceRef, ARA::ARAContentType contentType) const {
+            auto* controller = controllerInterface();
+            if (!controller || !audioSourceRef || !controller->isAudioSourceContentAnalysisIncomplete)
+                return false;
+            return controller->isAudioSourceContentAnalysisIncomplete(
+                controller_instance->documentControllerRef,
+                audioSourceRef,
+                contentType) != ARA::kARAFalse;
+        }
+
+        void completeFinishedAnalysisRequests(const ProjectObjectId& audioSourceId, bool forceComplete) {
+            auto audioSourceIt = audio_source_refs.find(audioSourceId);
+            if (audioSourceIt == audio_source_refs.end())
+                return;
+
+            struct Completion {
+                AraAnalysisCallback callback{};
+                AraAnalysisResult result{};
+            };
+            std::vector<Completion> completions;
+            std::vector<AraRequestId> completedIds;
+
+            for (const auto& [requestId, request] : pending_analysis_requests) {
+                if (request.audio_source_id != audioSourceId)
+                    continue;
+
+                bool complete = forceComplete;
+                if (!complete) {
+                    complete = true;
+                    for (auto contentType : request.content_types) {
+                        if (analysisIncomplete(audioSourceIt->second, contentType)) {
+                            complete = false;
+                            break;
+                        }
+                    }
+                }
+
+                if (!complete)
+                    continue;
+
+                completedIds.push_back(requestId);
+                completions.push_back(Completion{
+                    .callback = request.callback,
+                    .result = AraAnalysisResult{
+                        .requestId = requestId,
+                        .objectId = audioSourceId,
+                        .completedKinds = request.requested_kinds,
+                        .status = AraStatus::Ok,
+                        .error = {}
+                    }
+                });
+            }
+
+            for (auto requestId : completedIds)
+                pending_analysis_requests.erase(requestId);
+            for (auto& completion : completions)
+                if (completion.callback)
+                    completion.callback(completion.result);
+        }
+
+        AraRequestId requestAnalysis(AraAnalysisRequest request, AraAnalysisCallback callback) {
+            auto* controller = controllerInterface();
+            if (!controller || !controller->requestAudioSourceContentAnalysis)
+                return 0;
+
+            auto audioSourceIt = audio_source_refs.find(request.objectId);
+            if (audioSourceIt == audio_source_refs.end())
+                return 0;
+
+            std::vector<AraContentKind> requestedKinds;
+            std::vector<ARA::ARAContentType> contentTypes;
+            for (auto kind : request.contentKinds) {
+                auto contentType = araContentTypeForKind(kind);
+                if (!contentType || !factoryCanAnalyze(*contentType))
+                    continue;
+                requestedKinds.push_back(kind);
+                contentTypes.push_back(*contentType);
+            }
+
+            if (contentTypes.empty())
+                return 0;
+
+            const auto requestId = next_analysis_request_id++;
+            pending_analysis_requests[requestId] = PendingAnalysisRequest{
+                .audio_source_id = request.objectId,
+                .requested_kinds = std::move(requestedKinds),
+                .content_types = contentTypes,
+                .callback = std::move(callback)
+            };
+
+            controller->requestAudioSourceContentAnalysis(
+                controller_instance->documentControllerRef,
+                audioSourceIt->second,
+                static_cast<ARA::ARASize>(contentTypes.size()),
+                contentTypes.data());
+            completeFinishedAnalysisRequests(request.objectId, false);
+            return requestId;
+        }
+
+        void cancelAnalysis(AraRequestId requestId) {
+            pending_analysis_requests.erase(requestId);
+        }
+
+        bool saveArchiveState(std::vector<uint8_t>& archive) {
+            auto* controller = controllerInterface();
+            if (!controller)
+                return false;
+
+            archive.clear();
+            HostArchive hostArchive{
+                .read_data = nullptr,
+                .write_data = &archive,
+                .archive_id = "uapmd-ara-document"
+            };
+
+            if (controller->storeObjectsToArchive) {
+                std::vector<ARA::ARAAudioSourceRef> audioSourceRefs;
+                std::vector<ARA::ARAAudioModificationRef> audioModificationRefs;
+                std::vector<ARA::ARARegionSequenceRef> regionSequenceRefs;
+                audioSourceRefs.reserve(audio_source_refs.size());
+                audioModificationRefs.reserve(audio_modification_refs.size());
+                regionSequenceRefs.reserve(region_sequence_refs.size());
+
+                for (const auto& [id, ref] : audio_source_refs) {
+                    (void) id;
+                    if (ref)
+                        audioSourceRefs.push_back(ref);
+                }
+                for (const auto& [id, ref] : audio_modification_refs) {
+                    (void) id;
+                    if (ref)
+                        audioModificationRefs.push_back(ref);
+                }
+                for (const auto& [id, ref] : region_sequence_refs) {
+                    (void) id;
+                    if (ref)
+                        regionSequenceRefs.push_back(ref);
+                }
+
+                ARA::ARAStoreObjectsFilter filter{
+                    .structSize = sizeof(ARA::ARAStoreObjectsFilter),
+                    .documentData = ARA::kARATrue,
+                    .audioSourceRefsCount = static_cast<ARA::ARASize>(audioSourceRefs.size()),
+                    .audioSourceRefs = audioSourceRefs.empty() ? nullptr : audioSourceRefs.data(),
+                    .audioModificationRefsCount = static_cast<ARA::ARASize>(audioModificationRefs.size()),
+                    .audioModificationRefs = audioModificationRefs.empty() ? nullptr : audioModificationRefs.data(),
+                    .regionSequenceRefsCount = static_cast<ARA::ARASize>(regionSequenceRefs.size()),
+                    .regionSequenceRefs = regionSequenceRefs.empty() ? nullptr : regionSequenceRefs.data()
+                };
+                return controller->storeObjectsToArchive(
+                    controller_instance->documentControllerRef,
+                    reinterpret_cast<ARA::ARAArchiveWriterHostRef>(&hostArchive),
+                    &filter) != ARA::kARAFalse;
+            }
+
+            if (controller->storeDocumentToArchive)
+                return controller->storeDocumentToArchive(
+                    controller_instance->documentControllerRef,
+                    reinterpret_cast<ARA::ARAArchiveWriterHostRef>(&hostArchive)) != ARA::kARAFalse;
+
+            return false;
+        }
+
+        bool loadArchiveState(const std::vector<uint8_t>& archive) {
+            auto* controller = controllerInterface();
+            if (!controller || archive.empty())
+                return false;
+
+            HostArchive hostArchive{
+                .read_data = &archive,
+                .write_data = nullptr,
+                .archive_id = "uapmd-ara-document"
+            };
+
+            bool ok = false;
+            if (controller->restoreObjectsFromArchive) {
+                beginEditing();
+                ok = controller->restoreObjectsFromArchive(
+                    controller_instance->documentControllerRef,
+                    reinterpret_cast<ARA::ARAArchiveReaderHostRef>(&hostArchive),
+                    nullptr) != ARA::kARAFalse;
+                endEditing();
+            } else if (controller->beginRestoringDocumentFromArchive && controller->endRestoringDocumentFromArchive) {
+                beginEditing();
+                ok = controller->beginRestoringDocumentFromArchive(
+                    controller_instance->documentControllerRef,
+                    reinterpret_cast<ARA::ARAArchiveReaderHostRef>(&hostArchive)) != ARA::kARAFalse;
+                ok = controller->endRestoringDocumentFromArchive(
+                    controller_instance->documentControllerRef,
+                    reinterpret_cast<ARA::ARAArchiveReaderHostRef>(&hostArchive)) != ARA::kARAFalse && ok;
+                endEditing();
+            }
+
+            if (ok)
+                notifyModelUpdates();
+            return ok;
+        }
     };
 
     namespace {
@@ -1206,6 +1543,26 @@ namespace uapmd::ara {
             return reinterpret_cast<ARA::ARAContentReaderHostRef>(reader.release());
         }
 
+        void notifyAudioSourceAnalysisProgressFromImpl(
+            AraHostDocumentController::Impl* impl,
+            HostAudioSource* audioSourceHost,
+            ARA::ARAAnalysisProgressState state,
+            float value) {
+            (void) value;
+            if (!impl || !audioSourceHost)
+                return;
+            if (state == ARA::kARAAnalysisProgressCompleted)
+                impl->completeFinishedAnalysisRequests(audioSourceHost->id, false);
+        }
+
+        void notifyAudioSourceContentChangedFromImpl(
+            AraHostDocumentController::Impl* impl,
+            HostAudioSource* audioSourceHost) {
+            if (!impl || !audioSourceHost)
+                return;
+            impl->completeFinishedAnalysisRequests(audioSourceHost->id, false);
+        }
+
         ARA::ARABool readAudioSamplesFromImpl(
             AraHostDocumentController::Impl* impl,
             HostAudioReader* reader,
@@ -1295,6 +1652,26 @@ namespace uapmd::ara {
         if (!valid())
             return false;
         return impl_->applyProjectDocumentEvent(documentView, masterTrackSnapshot, event);
+    }
+
+    AraRequestId AraHostDocumentController::requestAnalysis(AraAnalysisRequest request, AraAnalysisCallback callback) {
+        if (!valid())
+            return 0;
+        return impl_->requestAnalysis(std::move(request), std::move(callback));
+    }
+
+    void AraHostDocumentController::cancelAnalysis(AraRequestId requestId) {
+        if (!valid())
+            return;
+        impl_->cancelAnalysis(requestId);
+    }
+
+    bool AraHostDocumentController::saveArchiveState(std::vector<uint8_t>& archive) {
+        return valid() && impl_->saveArchiveState(archive);
+    }
+
+    bool AraHostDocumentController::loadArchiveState(const std::vector<uint8_t>& archive) {
+        return valid() && impl_->loadArchiveState(archive);
     }
 
     void AraHostDocumentController::notifyModelUpdates() {
