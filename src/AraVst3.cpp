@@ -71,12 +71,12 @@ namespace uapmd::ara {
         }
     } // namespace
 
-    std::unique_ptr<AraFormatBinding> createVst3AraBinding(NativePluginInstanceHandleExtension& native) {
+    std::unique_ptr<AraFormatBinding> createVst3AraBinding(AraPluginInstanceHandleExtension& araHandles) {
         if (auto binding = createBindingFromHandle(
-                native.nativeHandle(remidy::NativePluginInstanceHandleKind::VST3Component)))
+                araHandles.nativeHandle(AraPluginInstanceHandleKind::VST3Component)))
             return binding;
         return createBindingFromHandle(
-            native.nativeHandle(remidy::NativePluginInstanceHandleKind::VST3Unknown));
+            araHandles.nativeHandle(AraPluginInstanceHandleKind::VST3Unknown));
     }
 
 } // namespace uapmd::ara

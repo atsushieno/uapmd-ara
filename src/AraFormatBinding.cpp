@@ -3,26 +3,26 @@
 namespace uapmd::ara {
 
     namespace {
-        NativePluginInstanceHandleExtension* nativeHandleExtension(AudioPluginInstanceAPI& pluginInstance) {
-            auto* extension = pluginInstance.extension(kNativePluginInstanceHandleExtensionId);
-            return dynamic_cast<NativePluginInstanceHandleExtension*>(extension);
+        AraPluginInstanceHandleExtension* araHandleExtension(AudioPluginInstanceAPI& pluginInstance) {
+            auto* extension = pluginInstance.extension(kAraPluginInstanceHandleExtensionId);
+            return dynamic_cast<AraPluginInstanceHandleExtension*>(extension);
         }
     }
 
     std::unique_ptr<AraFormatBinding> createAraFormatBinding(AudioPluginInstanceAPI& pluginInstance) {
-        auto* native = nativeHandleExtension(pluginInstance);
-        if (!native)
+        auto* araHandles = araHandleExtension(pluginInstance);
+        if (!araHandles)
             return nullptr;
 #if ANDROID
         // FIXME: implement
-        //if (auto binding = createAapAraBinding(*native))
+        //if (auto binding = createAapAraBinding(*araHandles))
         //    return binding;
 #else
-        if (auto binding = createVst3AraBinding(*native))
+        if (auto binding = createVst3AraBinding(*araHandles))
             return binding;
-        if (auto binding = createClapAraBinding(*native))
+        if (auto binding = createClapAraBinding(*araHandles))
             return binding;
-        if (auto binding = createAudioUnitAraBinding(*native))
+        if (auto binding = createAudioUnitAraBinding(*araHandles))
             return binding;
 #endif
         return nullptr;

@@ -45,9 +45,9 @@ namespace uapmd::ara {
         };
     } // namespace
 
-    std::unique_ptr<AraFormatBinding> createClapAraBinding(NativePluginInstanceHandleExtension& native) {
+    std::unique_ptr<AraFormatBinding> createClapAraBinding(AraPluginInstanceHandleExtension& araHandles) {
         auto* plugin = static_cast<clap_plugin_t*>(
-            native.nativeHandle(remidy::NativePluginInstanceHandleKind::CLAPPlugin));
+            araHandles.nativeHandle(AraPluginInstanceHandleKind::CLAPPlugin));
         auto binding = std::make_unique<ClapAraBinding>(plugin);
         if (!binding->usable())
             return nullptr;

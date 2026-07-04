@@ -14,6 +14,17 @@ if(NOT DEFINED vst3sdk_SOURCE_DIR AND DEFINED CPM_PACKAGE_vst3sdk_SOURCE_DIR)
     set(vst3sdk_SOURCE_DIR "${CPM_PACKAGE_vst3sdk_SOURCE_DIR}")
 endif()
 
+if(NOT TARGET uapmd-ara-api)
+    add_library(uapmd-ara-api INTERFACE)
+    add_library(uapmd::ara-api ALIAS uapmd-ara-api)
+    target_compile_definitions(uapmd-ara-api INTERFACE UAPMD_HAS_ARA=1)
+    target_include_directories(uapmd-ara-api INTERFACE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+            ${CMAKE_CURRENT_SOURCE_DIR}/external/ARA_SDK
+            ${CMAKE_CURRENT_SOURCE_DIR}/external/ARA_SDK/ARA_API
+    )
+endif()
+
 if (NOT ANDROID AND NOT EMSCRIPTEN)
     set(UAPMD_ARA_SOURCES_DESKTOP
             src/AraVst3.cpp
@@ -49,6 +60,7 @@ target_include_directories(uapmd-ara
 
 target_link_libraries(uapmd-ara
         PUBLIC
+        uapmd::ara-api
         uapmd-engine
         uapmd-data
         uapmd

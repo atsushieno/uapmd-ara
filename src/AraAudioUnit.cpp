@@ -81,13 +81,13 @@ namespace uapmd::ara {
     } // namespace
 #endif
 
-    std::unique_ptr<AraFormatBinding> createAudioUnitAraBinding(NativePluginInstanceHandleExtension& native) {
+    std::unique_ptr<AraFormatBinding> createAudioUnitAraBinding(AraPluginInstanceHandleExtension& araHandles) {
 #if __APPLE__
         auto* audioUnit = static_cast<AudioUnit>(
-            native.nativeHandle(remidy::NativePluginInstanceHandleKind::AudioUnitV2));
+            araHandles.nativeHandle(AraPluginInstanceHandleKind::AudioUnitV2));
         if (!audioUnit)
             audioUnit = static_cast<AudioUnit>(
-                native.nativeHandle(remidy::NativePluginInstanceHandleKind::AudioUnitV3BridgedV2));
+                araHandles.nativeHandle(AraPluginInstanceHandleKind::AudioUnitV3BridgedV2));
 
         auto binding = std::make_unique<AudioUnitAraBinding>(audioUnit);
         if (!binding->usable())

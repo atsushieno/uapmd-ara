@@ -9,6 +9,7 @@
 
 #include <ARA_API/ARAInterface.h>
 #include <uapmd-engine/uapmd-engine.hpp>
+#include "ara-plugin-instance-handles.hpp"
 
 namespace uapmd::ara {
 

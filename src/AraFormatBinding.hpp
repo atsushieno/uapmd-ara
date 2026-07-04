@@ -6,6 +6,7 @@
 
 #include <ARA_API/ARAInterface.h>
 #include <uapmd/uapmd.hpp>
+#include <uapmd-ara/ara-plugin-instance-handles.hpp>
 
 namespace uapmd::ara {
 
@@ -22,9 +23,9 @@ namespace uapmd::ara {
             ARA::ARAPlugInInstanceRoleFlags assignedRoles) = 0;
     };
 
-    std::unique_ptr<AraFormatBinding> createVst3AraBinding(NativePluginInstanceHandleExtension& native);
-    std::unique_ptr<AraFormatBinding> createClapAraBinding(NativePluginInstanceHandleExtension& native);
-    std::unique_ptr<AraFormatBinding> createAudioUnitAraBinding(NativePluginInstanceHandleExtension& native);
+    std::unique_ptr<AraFormatBinding> createVst3AraBinding(AraPluginInstanceHandleExtension& araHandles);
+    std::unique_ptr<AraFormatBinding> createClapAraBinding(AraPluginInstanceHandleExtension& araHandles);
+    std::unique_ptr<AraFormatBinding> createAudioUnitAraBinding(AraPluginInstanceHandleExtension& araHandles);
     std::unique_ptr<AraFormatBinding> createAraFormatBinding(AudioPluginInstanceAPI& pluginInstance);
 
 } // namespace uapmd::ara
