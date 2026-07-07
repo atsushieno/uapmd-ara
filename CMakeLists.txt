@@ -25,11 +25,17 @@ if(NOT TARGET uapmd-ara-api)
     )
 endif()
 
+if (APPLE)
+    set(UAPMD_ARA_SOURCES_DESKTOP_PLAT
+            src/AraAudioUnit.cpp
+    )
+endif ()
+
 if (NOT ANDROID AND NOT EMSCRIPTEN)
     set(UAPMD_ARA_SOURCES_DESKTOP
             src/AraVst3.cpp
             src/AraClap.cpp
-            src/AraAudioUnit.cpp
+            ${UAPMD_ARA_SOURCES_DESKTOP_PLAT}
     )
 endif ()
 

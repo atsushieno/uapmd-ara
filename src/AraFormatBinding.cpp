@@ -22,8 +22,10 @@ namespace uapmd::ara {
             return binding;
         if (auto binding = createClapAraBinding(*araHandles))
             return binding;
+#if defined(__APPLE__)
         if (auto binding = createAudioUnitAraBinding(*araHandles))
             return binding;
+#endif
 #endif
         return nullptr;
     }
