@@ -23,6 +23,7 @@ namespace uapmd::ara {
         bool valid() const;
         ARA::ARADocumentControllerRef documentControllerRef() const;
         const ARA::ARAFactory* factory() const;
+        void bindPluginExtension(const ARA::ARAPlugInExtensionInstance* pluginExtension);
         bool resyncFromProjectDocument(
             ProjectDocumentView& documentView,
             const TimelineFacade::MasterTrackSnapshot& masterTrackSnapshot);

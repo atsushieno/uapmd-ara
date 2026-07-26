@@ -397,6 +397,7 @@ namespace uapmd::ara {
         ARA::ARADocumentControllerHostInstance host_instance{};
         ARA::ARADocumentProperties document_properties{};
         const ARA::ARADocumentControllerInstance* controller_instance{};
+        const ARA::ARAPlugInExtensionInstance* plugin_extension{};
         bool initialized_factory{};
         ProjectDocumentView* document_view{};
         TimelineFacade::MasterTrackSnapshot master_track_snapshot{};
@@ -528,14 +529,50 @@ namespace uapmd::ara {
                 controller->notifyModelUpdates(controller_instance->documentControllerRef);
         }
 
+        bool playbackRendererAvailable() const {
+            return plugin_extension &&
+                plugin_extension->playbackRendererRef &&
+                plugin_extension->playbackRendererInterface &&
+                plugin_extension->playbackRendererInterface->addPlaybackRegion &&
+                plugin_extension->playbackRendererInterface->removePlaybackRegion;
+        }
+
+        void addPlaybackRegionToRenderer(ARA::ARAPlaybackRegionRef playbackRegionRef) {
+            if (!playbackRendererAvailable() || !playbackRegionRef)
+                return;
+            plugin_extension->playbackRendererInterface->addPlaybackRegion(
+                plugin_extension->playbackRendererRef,
+                playbackRegionRef);
+        }
+
+        void removePlaybackRegionFromRenderer(ARA::ARAPlaybackRegionRef playbackRegionRef) {
+            if (!playbackRendererAvailable() || !playbackRegionRef)
+                return;
+            plugin_extension->playbackRendererInterface->removePlaybackRegion(
+                plugin_extension->playbackRendererRef,
+                playbackRegionRef);
+        }
+
+        void bindPluginExtension(const ARA::ARAPlugInExtensionInstance* pluginExtension) {
+            plugin_extension = pluginExtension;
+            if (!playbackRendererAvailable())
+                return;
+            for (const auto& [clipId, playbackRegionRef] : playback_region_refs) {
+                (void) clipId;
+                addPlaybackRegionToRenderer(playbackRegionRef);
+            }
+        }
+
         void clearModel() {
             auto* controller = controllerInterface();
             if (!controller)
                 return;
 
-            for (auto it = playback_region_refs.rbegin(); it != playback_region_refs.rend(); ++it)
+            for (auto it = playback_region_refs.rbegin(); it != playback_region_refs.rend(); ++it) {
+                removePlaybackRegionFromRenderer(it->second);
                 if (controller->destroyPlaybackRegion)
                     controller->destroyPlaybackRegion(controller_instance->documentControllerRef, it->second);
+            }
             playback_region_refs.clear();
             playback_region_hosts.clear();
             playback_region_track_ids.clear();
@@ -853,8 +890,11 @@ namespace uapmd::ara {
         void destroyPlaybackRegion(const ProjectObjectId& clipId) {
             auto* controller = controllerInterface();
             auto it = playback_region_refs.find(clipId);
-            if (controller && it != playback_region_refs.end() && controller->destroyPlaybackRegion)
-                controller->destroyPlaybackRegion(controller_instance->documentControllerRef, it->second);
+            if (it != playback_region_refs.end()) {
+                removePlaybackRegionFromRenderer(it->second);
+                if (controller && controller->destroyPlaybackRegion)
+                    controller->destroyPlaybackRegion(controller_instance->documentControllerRef, it->second);
+            }
             playback_region_refs.erase(clipId);
             playback_region_hosts.erase(clipId);
             playback_region_track_ids.erase(clipId);
@@ -1010,6 +1050,7 @@ namespace uapmd::ara {
                 if (!ref)
                     return false;
                 playback_region_refs[clipId] = ref;
+                addPlaybackRegionToRenderer(ref);
             }
 
             playback_region_track_ids[clipId] = clip->trackId;
@@ -1635,6 +1676,12 @@ namespace uapmd::ara {
 
     const ARA::ARAFactory* AraHostDocumentController::factory() const {
         return impl_ ? impl_->factory : nullptr;
+    }
+
+    void AraHostDocumentController::bindPluginExtension(const ARA::ARAPlugInExtensionInstance* pluginExtension) {
+        if (!valid())
+            return;
+        impl_->bindPluginExtension(pluginExtension);
     }
 
     bool AraHostDocumentController::resyncFromProjectDocument(

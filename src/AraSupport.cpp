@@ -135,6 +135,7 @@ namespace uapmd::ara {
                     knownRoles);
                 if (!pluginExtension)
                     return AraStatus::BackendError;
+                controller->bindPluginExtension(pluginExtension);
 
                 native_ara_documents_.emplace(
                     pluginInstanceId,
