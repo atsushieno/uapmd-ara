@@ -5,7 +5,7 @@
 #include <string_view>
 
 #include <ARA_API/ARAInterface.h>
-#include <uapmd/uapmd.hpp>
+#include <uapmd-plugin-hosting/detail/plugin-api/AudioPluginInstanceAPI.hpp>
 #include <uapmd-ara/ara-plugin-instance-handles.hpp>
 
 namespace uapmd::ara {

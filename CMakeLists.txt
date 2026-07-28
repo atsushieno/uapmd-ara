@@ -54,7 +54,8 @@ target_include_directories(uapmd-ara
         PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/include
         ${UAPMD_REPO_ROOT}/source/remidy/include
-        ${UAPMD_REPO_ROOT}/source/uapmd/include
+        ${UAPMD_REPO_ROOT}/source/uapmd-midi-service/include
+        ${UAPMD_REPO_ROOT}/source/uapmd-plugin-hosting/include
         ${UAPMD_REPO_ROOT}/source/uapmd-data/include
         ${UAPMD_REPO_ROOT}/source/uapmd-engine/include
         ${CMAKE_CURRENT_SOURCE_DIR}/external/ARA_SDK
@@ -69,6 +70,6 @@ target_link_libraries(uapmd-ara
         uapmd::ara-api
         uapmd-engine
         uapmd-data
-        uapmd
+        uapmd-midi-service
         remidy
 )
