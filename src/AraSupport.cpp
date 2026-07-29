@@ -148,7 +148,11 @@ namespace uapmd::ara {
             }
 
             void detachPlugin(int32_t pluginInstanceId) override {
-                native_ara_documents_.erase(pluginInstanceId);
+                if (auto it = native_ara_documents_.find(pluginInstanceId); it != native_ara_documents_.end()) {
+                    if (it->second.controller)
+                        it->second.controller->bindPluginExtension(nullptr);
+                    native_ara_documents_.erase(it);
+                }
                 session_->detachPlugin(pluginInstanceId);
             }
 
