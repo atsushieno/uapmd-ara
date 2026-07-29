@@ -1,22 +1,47 @@
 #include "AraHostDocumentController.hpp"
 
 #include <algorithm>
+#include <cmath>
+#include <cstdlib>
 #include <cstring>
+#include <iostream>
 #include <map>
 #include <memory>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
+
+#include <umppi/umppi.hpp>
 
 namespace uapmd::ara {
 
     namespace {
         ARA::ARAAssertFunction gAraAssertFunction{};
 
+        constexpr std::string_view kMidiAudioSourcePrefix{"midi-source."};
+
+        bool araDiagnosticsEnabled() {
+            static const bool enabled = std::getenv("UAPMD_ARA_DIAGNOSTICS") != nullptr;
+            return enabled;
+        }
+
+        ARA::ARAContentUpdateFlags araNotesChangedFlags() {
+            return ARA::kARAContentUpdateSignalScopeRemainsUnchanged |
+                ARA::kARAContentUpdateTimingScopeRemainsUnchanged |
+                ARA::kARAContentUpdateTuningScopeRemainsUnchanged |
+                ARA::kARAContentUpdateHarmonicScopeRemainsUnchanged;
+        }
+
         struct HostAudioSource {
             ProjectObjectId id;
             std::string name;
             std::string persistent_id;
+            ProjectObjectId clip_id;
+            bool synthetic_midi{};
+            uint32_t channel_count{0};
+            double sample_rate{0.0};
+            int64_t frame_count{0};
         };
 
         struct HostRegionSequence {
@@ -43,6 +68,7 @@ namespace uapmd::ara {
 
         struct HostContentReader {
             ARA::ARAContentType content_type{};
+            std::vector<ARA::ARAContentNote> notes{};
             std::vector<ARA::ARAContentTempoEntry> tempo_entries{};
             std::vector<ARA::ARAContentBarSignature> bar_signatures{};
             std::vector<ARA::ARAContentTuning> tunings{};
@@ -65,6 +91,32 @@ namespace uapmd::ara {
             if (sampleRate <= 0)
                 sampleRate = 48000.0;
             return static_cast<double>(samples) / sampleRate;
+        }
+
+        double secondsFromTicks(uint64_t ticks, uint32_t tickResolution, double bpm) {
+            if (tickResolution == 0)
+                tickResolution = 480;
+            if (bpm <= 0.0)
+                bpm = 120.0;
+            return static_cast<double>(ticks) * (60.0 / bpm) / static_cast<double>(tickResolution);
+        }
+
+        bool isSyntheticMidiAudioSourceId(const ProjectObjectId& id) {
+            return id.starts_with(kMidiAudioSourcePrefix);
+        }
+
+        ProjectObjectId syntheticMidiAudioSourceId(const ProjectObjectId& clipId) {
+            return std::string(kMidiAudioSourcePrefix) + clipId;
+        }
+
+        std::optional<ProjectObjectId> clipIdFromSyntheticMidiAudioSourceId(const ProjectObjectId& audioSourceId) {
+            if (!isSyntheticMidiAudioSourceId(audioSourceId))
+                return std::nullopt;
+            return audioSourceId.substr(kMidiAudioSourcePrefix.size());
+        }
+
+        double frequencyForPitchNumber(int pitchNumber) {
+            return 440.0 * std::pow(2.0, (static_cast<double>(pitchNumber) - 69.0) / 12.0);
         }
 
         struct PlaybackRegionTiming {
@@ -110,6 +162,22 @@ namespace uapmd::ara {
         ARA::ARAContentReaderHostRef createMusicalContentReaderFromImpl(
             AraHostDocumentController::Impl* impl,
             HostRegionSequence* musicalContextHost,
+            ARA::ARAContentType contentType,
+            const ARA::ARAContentTimeRange* range);
+
+        ARA::ARABool isAudioSourceContentAvailableFromImpl(
+            AraHostDocumentController::Impl* impl,
+            HostAudioSource* audioSourceHost,
+            ARA::ARAContentType contentType);
+
+        ARA::ARAContentGrade getAudioSourceContentGradeFromImpl(
+            AraHostDocumentController::Impl* impl,
+            HostAudioSource* audioSourceHost,
+            ARA::ARAContentType contentType);
+
+        ARA::ARAContentReaderHostRef createAudioSourceContentReaderFromImpl(
+            AraHostDocumentController::Impl* impl,
+            HostAudioSource* audioSourceHost,
             ARA::ARAContentType contentType,
             const ARA::ARAContentTimeRange* range);
 
@@ -194,20 +262,20 @@ namespace uapmd::ara {
             ARA::ARAContentAccessControllerHostRef controllerHostRef,
             ARA::ARAAudioSourceHostRef audioSourceHostRef,
             ARA::ARAContentType contentType) {
-            (void) controllerHostRef;
-            (void) audioSourceHostRef;
-            (void) contentType;
-            return ARA::kARAFalse;
+            return isAudioSourceContentAvailableFromImpl(
+                reinterpret_cast<AraHostDocumentController::Impl*>(controllerHostRef),
+                reinterpret_cast<HostAudioSource*>(audioSourceHostRef),
+                contentType);
         }
 
         ARA::ARAContentGrade ARA_CALL getAudioSourceContentGrade(
             ARA::ARAContentAccessControllerHostRef controllerHostRef,
             ARA::ARAAudioSourceHostRef audioSourceHostRef,
             ARA::ARAContentType contentType) {
-            (void) controllerHostRef;
-            (void) audioSourceHostRef;
-            (void) contentType;
-            return ARA::kARAContentGradeInitial;
+            return getAudioSourceContentGradeFromImpl(
+                reinterpret_cast<AraHostDocumentController::Impl*>(controllerHostRef),
+                reinterpret_cast<HostAudioSource*>(audioSourceHostRef),
+                contentType);
         }
 
         ARA::ARAContentReaderHostRef ARA_CALL createAudioSourceContentReader(
@@ -215,11 +283,11 @@ namespace uapmd::ara {
             ARA::ARAAudioSourceHostRef audioSourceHostRef,
             ARA::ARAContentType contentType,
             const ARA::ARAContentTimeRange* range) {
-            (void) controllerHostRef;
-            (void) audioSourceHostRef;
-            (void) contentType;
-            (void) range;
-            return nullptr;
+            return createAudioSourceContentReaderFromImpl(
+                reinterpret_cast<AraHostDocumentController::Impl*>(controllerHostRef),
+                reinterpret_cast<HostAudioSource*>(audioSourceHostRef),
+                contentType,
+                range);
         }
 
         ARA::ARAInt32 ARA_CALL getContentReaderEventCount(
@@ -230,6 +298,8 @@ namespace uapmd::ara {
             if (!reader)
                 return 0;
             switch (reader->content_type) {
+                case ARA::kARAContentTypeNotes:
+                    return static_cast<ARA::ARAInt32>(reader->notes.size());
                 case ARA::kARAContentTypeTempoEntries:
                     return static_cast<ARA::ARAInt32>(reader->tempo_entries.size());
                 case ARA::kARAContentTypeBarSignatures:
@@ -251,6 +321,10 @@ namespace uapmd::ara {
                 return nullptr;
             const auto index = static_cast<size_t>(eventIndex);
             switch (reader->content_type) {
+                case ARA::kARAContentTypeNotes:
+                    if (index >= reader->notes.size())
+                        return nullptr;
+                    return &reader->notes[index];
                 case ARA::kARAContentTypeTempoEntries:
                     if (index >= reader->tempo_entries.size())
                         return nullptr;
@@ -436,6 +510,7 @@ namespace uapmd::ara {
         std::map<ProjectObjectId, ARA::ARAPlaybackRegionRef> playback_region_refs{};
         std::map<ProjectObjectId, ProjectObjectId> playback_region_track_ids{};
         std::map<ProjectObjectId, ProjectObjectId> playback_region_audio_source_ids{};
+        std::map<ProjectObjectId, ProjectObjectId> midi_clip_audio_source_ids{};
         std::map<AraRequestId, PendingAnalysisRequest> pending_analysis_requests{};
         AraRequestId next_analysis_request_id{1};
 
@@ -600,6 +675,7 @@ namespace uapmd::ara {
             playback_region_hosts.clear();
             playback_region_track_ids.clear();
             playback_region_audio_source_ids.clear();
+            midi_clip_audio_source_ids.clear();
 
             for (auto it = audio_modification_refs.rbegin(); it != audio_modification_refs.rend(); ++it)
                 if (controller->destroyAudioModification)
@@ -681,60 +757,7 @@ namespace uapmd::ara {
             }
 
             for (const auto& audioSourceId : view.audioSourceIds()) {
-                auto source = view.getAudioSource(audioSourceId);
-                if (!source || source->frameCount <= 0 || source->channelCount == 0)
-                    continue;
-
-                auto& host = audio_source_hosts[audioSourceId];
-                host = HostAudioSource{
-                    .id = audioSourceId,
-                    .name = source->filepath.empty() ? audioSourceId : source->filepath,
-                    .persistent_id = "uapmd.audio-source." + audioSourceId
-                };
-                ARA::ARAAudioSourceProperties sourceProperties{
-                    .structSize = ARA::kARAAudioSourcePropertiesMinSize,
-                    .name = host.name.c_str(),
-                    .persistentID = host.persistent_id.c_str(),
-                    .sampleCount = source->frameCount,
-                    .sampleRate = source->sampleRate,
-                    .channelCount = static_cast<ARA::ARAChannelCount>(source->channelCount),
-                    .merits64BitSamples = ARA::kARAFalse,
-                    .channelArrangementDataType = ARA::kARAChannelArrangementUndefined,
-                    .channelArrangement = nullptr
-                };
-                ARA::ARAAudioSourceRef sourceRef{};
-                if (controller->createAudioSource)
-                    sourceRef = controller->createAudioSource(
-                        controller_instance->documentControllerRef,
-                        reinterpret_cast<ARA::ARAAudioSourceHostRef>(&host),
-                        &sourceProperties);
-                if (!sourceRef)
-                    continue;
-                audio_source_refs[audioSourceId] = sourceRef;
-                if (controller->enableAudioSourceSamplesAccess)
-                    controller->enableAudioSourceSamplesAccess(
-                        controller_instance->documentControllerRef,
-                        sourceRef,
-                        ARA::kARATrue);
-
-                auto modificationId = "mod." + audioSourceId;
-                auto& modificationHost = audio_modification_hosts[modificationId];
-                modificationHost = HostAudioModification{
-                    .id = modificationId,
-                    .name = host.name,
-                    .persistent_id = "uapmd.audio-modification." + audioSourceId
-                };
-                ARA::ARAAudioModificationProperties modificationProperties{
-                    .structSize = ARA::kARAAudioModificationPropertiesMinSize,
-                    .name = modificationHost.name.c_str(),
-                    .persistentID = modificationHost.persistent_id.c_str()
-                };
-                if (controller->createAudioModification)
-                    audio_modification_refs[modificationId] = controller->createAudioModification(
-                        controller_instance->documentControllerRef,
-                        sourceRef,
-                        reinterpret_cast<ARA::ARAAudioModificationHostRef>(&modificationHost),
-                        &modificationProperties);
+                createOrUpdateAudioSource(view, audioSourceId);
             }
 
             for (const auto& trackId : view.trackIds()) {
@@ -742,65 +765,8 @@ namespace uapmd::ara {
                 if (sequenceIt == region_sequence_refs.end())
                     continue;
 
-                for (const auto& clipId : view.clipIds(trackId)) {
-                    auto clip = view.getClip(clipId);
-                    if (!clip || clip->clipType != ClipType::Audio)
-                        continue;
-
-                    ProjectObjectId audioSourceId;
-                    for (const auto& candidateId : view.audioSourceIds()) {
-                        auto source = view.getAudioSource(candidateId);
-                        if (source && source->clipId == clipId) {
-                            audioSourceId = candidateId;
-                            break;
-                        }
-                    }
-                    if (audioSourceId.empty())
-                        continue;
-
-                    auto modificationIt = audio_modification_refs.find("mod." + audioSourceId);
-                    if (modificationIt == audio_modification_refs.end())
-                        continue;
-
-                    auto source = view.getAudioSource(audioSourceId);
-                    const auto sourceSampleRate = source && source->sampleRate > 0 ? source->sampleRate : 48000.0;
-                    const auto timelineSampleRate = clip->sampleRate > 0 ? clip->sampleRate : sourceSampleRate;
-                    const auto modificationDuration = source && source->frameCount > 0
-                        ? secondsFromSamples(source->frameCount, sourceSampleRate)
-                        : secondsFromSamples(clip->durationSamples, sourceSampleRate);
-                    const auto timing = playbackRegionTiming(
-                        clip->position.samples,
-                        clip->durationSamples,
-                        timelineSampleRate,
-                        modificationDuration);
-                    auto& host = playback_region_hosts[clipId];
-                    host = HostPlaybackRegion{
-                        .id = clipId,
-                        .name = clip->name.empty() ? clipId : clip->name
-                    };
-                    ARA::ARAPlaybackRegionProperties regionProperties{
-                        .structSize = ARA::kARAPlaybackRegionPropertiesMinSize,
-                        .transformationFlags = ARA::kARAPlaybackTransformationNoChanges,
-                        .startInModificationTime = timing.startInModificationTime,
-                        .durationInModificationTime = timing.durationInModificationTime,
-                        .startInPlaybackTime = timing.startInPlaybackTime,
-                        .durationInPlaybackTime = timing.durationInPlaybackTime,
-                        .musicalContextRef = musical_context_ref,
-                        .regionSequenceRef = sequenceIt->second,
-                        .name = host.name.c_str(),
-                        .color = nullptr
-                    };
-                    if (controller->createPlaybackRegion)
-                        playback_region_refs[clipId] = controller->createPlaybackRegion(
-                            controller_instance->documentControllerRef,
-                            modificationIt->second,
-                            reinterpret_cast<ARA::ARAPlaybackRegionHostRef>(&host),
-                            &regionProperties);
-                    if (playback_region_refs.contains(clipId)) {
-                        playback_region_track_ids[clipId] = trackId;
-                        playback_region_audio_source_ids[clipId] = audioSourceId;
-                    }
-                }
+                for (const auto& clipId : view.clipIds(trackId))
+                    createOrUpdatePlaybackRegion(view, clipId);
             }
 
             endEditing();
@@ -808,13 +774,58 @@ namespace uapmd::ara {
             return true;
         }
 
-        std::optional<ProjectObjectId> audioSourceIdForClip(ProjectDocumentView& view, const ProjectObjectId& clipId) {
+        std::optional<ProjectObjectId> audioSourceIdForClip(ProjectDocumentView& view, const ProjectClipSnapshot& clip) {
+            if (clip.clipType == ClipType::Midi)
+                return syntheticMidiAudioSourceId(clip.clipId);
+
             for (const auto& audioSourceId : view.audioSourceIds()) {
                 auto source = view.getAudioSource(audioSourceId);
-                if (source && source->clipId == clipId)
+                if (source && source->clipId == clip.clipId)
                     return audioSourceId;
             }
             return std::nullopt;
+        }
+
+        bool clipsOverlap(const ProjectClipSnapshot& a, const ProjectClipSnapshot& b) const {
+            const auto aStart = a.position.samples;
+            const auto bStart = b.position.samples;
+            const auto aEnd = aStart + std::max<int64_t>(0, a.durationSamples);
+            const auto bEnd = bStart + std::max<int64_t>(0, b.durationSamples);
+            return aStart < bEnd && bStart < aEnd;
+        }
+
+        std::optional<ProjectObjectId> associatedAudioSourceIdForMidiClip(
+            ProjectDocumentView& view,
+            const ProjectClipSnapshot& midiClip) {
+            if (midiClip.clipType != ClipType::Midi)
+                return std::nullopt;
+
+            for (const auto& clipId : view.clipIds(midiClip.trackId)) {
+                auto clip = view.getClip(clipId);
+                if (!clip || clip->clipType != ClipType::Audio || !clipsOverlap(midiClip, *clip))
+                    continue;
+                if (auto audioSourceId = audioSourceIdForClip(view, *clip))
+                    return audioSourceId;
+            }
+            return std::nullopt;
+        }
+
+        std::vector<ProjectClipSnapshot> associatedMidiClipsForAudioClip(
+            ProjectDocumentView& view,
+            const ProjectClipSnapshot& audioClip) const {
+            std::vector<ProjectClipSnapshot> result;
+            if (audioClip.clipType != ClipType::Audio)
+                return result;
+
+            for (const auto& clipId : view.clipIds(audioClip.trackId)) {
+                auto clip = view.getClip(clipId);
+                if (clip && clip->clipType == ClipType::Midi && clipsOverlap(audioClip, *clip))
+                    result.push_back(*clip);
+            }
+            std::stable_sort(result.begin(), result.end(), [](const auto& a, const auto& b) {
+                return a.position.samples < b.position.samples;
+            });
+            return result;
         }
 
         ARA::ARAMusicalContextProperties musicalContextProperties() const {
@@ -851,6 +862,20 @@ namespace uapmd::ara {
             };
         }
 
+        ARA::ARAAudioSourceProperties syntheticAudioSourceProperties(HostAudioSource& host) const {
+            return ARA::ARAAudioSourceProperties{
+                .structSize = ARA::kARAAudioSourcePropertiesMinSize,
+                .name = host.name.c_str(),
+                .persistentID = host.persistent_id.c_str(),
+                .sampleCount = std::max<int64_t>(1, host.frame_count),
+                .sampleRate = host.sample_rate > 0.0 ? host.sample_rate : 48000.0,
+                .channelCount = static_cast<ARA::ARAChannelCount>(std::max<uint32_t>(1, host.channel_count)),
+                .merits64BitSamples = ARA::kARAFalse,
+                .channelArrangementDataType = ARA::kARAChannelArrangementUndefined,
+                .channelArrangement = nullptr
+            };
+        }
+
         ARA::ARAAudioModificationProperties audioModificationProperties(HostAudioModification& host) const {
             return ARA::ARAAudioModificationProperties{
                 .structSize = ARA::kARAAudioModificationPropertiesMinSize,
@@ -859,21 +884,224 @@ namespace uapmd::ara {
             };
         }
 
+        std::vector<ARA::ARAContentNote> makeClipNotes(
+            const ProjectClipSnapshot& clip,
+            double baseTimeSeconds,
+            const ARA::ARAContentTimeRange* range) const {
+            if (!document_view || clip.clipType != ClipType::Midi)
+                return {};
+
+            std::vector<uapmd_ump_t> events;
+            std::vector<uint64_t> ticks;
+            uint32_t tickResolution = clip.tickResolution;
+            if (!document_view->readClipUmpContent(clip.clipId, events, ticks, tickResolution) || events.empty()) {
+                if (araDiagnosticsEnabled())
+                    std::cerr << "[ARA] MIDI note reader: clip " << clip.clipId << " has no UMP content" << std::endl;
+                return {};
+            }
+            if (ticks.size() < events.size()) {
+                if (araDiagnosticsEnabled())
+                    std::cerr << "[ARA] MIDI note reader: clip " << clip.clipId
+                              << " timestamp count " << ticks.size()
+                              << " is smaller than UMP word count " << events.size() << std::endl;
+                return {};
+            }
+
+            struct ActiveNote {
+                double startSeconds{};
+                float volume{1.0f};
+                int pitchNumber{-1};
+            };
+            std::unordered_map<uint32_t, ActiveNote> activeNotes;
+            std::vector<ARA::ARAContentNote> notes;
+
+            auto noteKey = [](uint8_t group, uint8_t channel, uint8_t note) {
+                return (static_cast<uint32_t>(group) << 12) |
+                    (static_cast<uint32_t>(channel) << 8) |
+                    static_cast<uint32_t>(note);
+            };
+            auto intersectsRange = [range](const ARA::ARAContentNote& note) {
+                if (!range)
+                    return true;
+                const auto noteEnd = note.startPosition + note.signalDuration;
+                const auto rangeEnd = range->start + range->duration;
+                return noteEnd >= range->start && note.startPosition <= rangeEnd;
+            };
+            auto closeNote = [&](uint8_t group, uint8_t channel, uint8_t pitch, double eventSeconds) {
+                auto it = activeNotes.find(noteKey(group, channel, pitch));
+                if (it == activeNotes.end())
+                    return;
+
+                const auto duration = std::max(0.0, eventSeconds - it->second.startSeconds);
+                ARA::ARAContentNote note{
+                    .frequency = static_cast<float>(frequencyForPitchNumber(it->second.pitchNumber)),
+                    .pitchNumber = static_cast<ARA::ARAPitchNumber>(it->second.pitchNumber),
+                    .volume = it->second.volume,
+                    .startPosition = it->second.startSeconds,
+                    .attackDuration = 0.0,
+                    .noteDuration = duration,
+                    .signalDuration = duration
+                };
+                if (intersectsRange(note))
+                    notes.push_back(note);
+                activeNotes.erase(it);
+            };
+
+            for (size_t index = 0; index < events.size();) {
+                const auto messageType = static_cast<uint8_t>((events[index] >> 28) & 0xF);
+                auto wordCount = static_cast<size_t>(umppi::umpSizeInInts(messageType));
+                if (wordCount == 0)
+                    wordCount = 1;
+                if (index + wordCount > events.size())
+                    break;
+
+                const auto eventSeconds = baseTimeSeconds + secondsFromTicks(
+                    ticks[index],
+                    tickResolution != 0 ? tickResolution : clip.tickResolution,
+                    clip.clipTempo);
+
+                if (messageType == umppi::MidiMessageType::MIDI1) {
+                    umppi::Ump ump(events[index]);
+                    const auto status = static_cast<uint8_t>(ump.getStatusCode());
+                    const auto group = ump.getGroup();
+                    const auto channel = ump.getChannelInGroup();
+                    const auto pitch = ump.getMidi1Note();
+                    const auto velocity = ump.getMidi1Velocity();
+                    if (status == umppi::MidiChannelStatus::NOTE_ON && velocity > 0) {
+                        activeNotes[noteKey(group, channel, pitch)] = ActiveNote{
+                            .startSeconds = eventSeconds,
+                            .volume = std::clamp(static_cast<float>(velocity) / 127.0f, 0.0f, 1.0f),
+                            .pitchNumber = static_cast<int>(pitch)
+                        };
+                    } else if (status == umppi::MidiChannelStatus::NOTE_OFF ||
+                               (status == umppi::MidiChannelStatus::NOTE_ON && velocity == 0)) {
+                        closeNote(group, channel, pitch, eventSeconds);
+                    }
+                } else if (messageType == umppi::MidiMessageType::MIDI2 && wordCount >= 2) {
+                    umppi::Ump ump(events[index], events[index + 1], 0, 0);
+                    const auto status = static_cast<uint8_t>(ump.getStatusCode());
+                    const auto group = ump.getGroup();
+                    const auto channel = ump.getChannelInGroup();
+                    const auto pitch = ump.getMidi2Note();
+                    const auto velocity = ump.getMidi2Velocity16();
+                    if (status == umppi::MidiChannelStatus::NOTE_ON && velocity > 0) {
+                        activeNotes[noteKey(group, channel, pitch)] = ActiveNote{
+                            .startSeconds = eventSeconds,
+                            .volume = std::clamp(static_cast<float>(velocity) / 65535.0f, 0.0f, 1.0f),
+                            .pitchNumber = static_cast<int>(pitch)
+                        };
+                    } else if (status == umppi::MidiChannelStatus::NOTE_OFF ||
+                               (status == umppi::MidiChannelStatus::NOTE_ON && velocity == 0)) {
+                        closeNote(group, channel, pitch, eventSeconds);
+                    }
+                }
+
+                index += wordCount;
+            }
+
+            const auto clipEnd = baseTimeSeconds + secondsFromSamples(
+                clip.durationSamples,
+                clip.sampleRate > 0.0 ? clip.sampleRate : 48000.0);
+            for (const auto& [key, active] : activeNotes) {
+                (void) key;
+                const auto duration = std::max(0.0, clipEnd - active.startSeconds);
+                ARA::ARAContentNote note{
+                    .frequency = static_cast<float>(frequencyForPitchNumber(active.pitchNumber)),
+                    .pitchNumber = static_cast<ARA::ARAPitchNumber>(active.pitchNumber),
+                    .volume = active.volume,
+                    .startPosition = active.startSeconds,
+                    .attackDuration = 0.0,
+                    .noteDuration = duration,
+                    .signalDuration = duration
+                };
+                if (intersectsRange(note))
+                    notes.push_back(note);
+            }
+
+            std::stable_sort(notes.begin(), notes.end(), [](const auto& a, const auto& b) {
+                return a.startPosition < b.startPosition;
+            });
+            if (araDiagnosticsEnabled())
+                std::cerr << "[ARA] MIDI note reader: clip " << clip.clipId
+                          << " produced " << notes.size()
+                          << " ARAContentNote events from " << events.size()
+                          << " UMP words" << std::endl;
+            return notes;
+        }
+
+        std::vector<ARA::ARAContentNote> makeAudioSourceNotes(
+            const ProjectAudioSourceSnapshot& source,
+            const ARA::ARAContentTimeRange* range) const {
+            if (!document_view)
+                return {};
+            auto audioClip = document_view->getClip(source.clipId);
+            if (!audioClip || audioClip->clipType != ClipType::Audio)
+                return {};
+
+            const auto sourceSampleRate = source.sampleRate > 0.0 ? source.sampleRate : 48000.0;
+            const auto timelineSampleRate = audioClip->sampleRate > 0.0 ? audioClip->sampleRate : sourceSampleRate;
+            const auto sourceDuration = secondsFromSamples(source.frameCount, sourceSampleRate);
+
+            auto intersectsRange = [range](const ARA::ARAContentNote& note) {
+                if (!range)
+                    return true;
+                const auto noteEnd = note.startPosition + note.signalDuration;
+                const auto rangeEnd = range->start + range->duration;
+                return noteEnd >= range->start && note.startPosition <= rangeEnd;
+            };
+            auto clampToSource = [sourceDuration](ARA::ARAContentNote note) -> std::optional<ARA::ARAContentNote> {
+                const auto noteEnd = note.startPosition + note.signalDuration;
+                const auto clampedStart = std::clamp(note.startPosition, 0.0, sourceDuration);
+                const auto clampedEnd = std::clamp(noteEnd, 0.0, sourceDuration);
+                if (clampedEnd <= clampedStart)
+                    return std::nullopt;
+                const auto clampedDuration = clampedEnd - clampedStart;
+                note.startPosition = clampedStart;
+                note.noteDuration = std::min(note.noteDuration, clampedDuration);
+                note.signalDuration = clampedDuration;
+                return note;
+            };
+
+            std::vector<ARA::ARAContentNote> notes;
+            for (const auto& midiClip : associatedMidiClipsForAudioClip(*document_view, *audioClip)) {
+                const auto baseTimeSeconds = secondsFromSamples(
+                    midiClip.position.samples - audioClip->position.samples,
+                    timelineSampleRate);
+                auto clipNotes = makeClipNotes(midiClip, baseTimeSeconds, nullptr);
+                for (auto& note : clipNotes) {
+                    auto clamped = clampToSource(note);
+                    if (clamped && intersectsRange(*clamped))
+                        notes.push_back(*clamped);
+                }
+            }
+            std::stable_sort(notes.begin(), notes.end(), [](const auto& a, const auto& b) {
+                return a.startPosition < b.startPosition;
+            });
+            return notes;
+        }
+
         std::optional<ARA::ARAPlaybackRegionProperties> playbackRegionProperties(
             ProjectDocumentView& view,
             const ProjectClipSnapshot& clip,
             HostPlaybackRegion& host,
             ARA::ARARegionSequenceRef regionSequenceRef) {
-            auto audioSourceId = audioSourceIdForClip(view, clip.clipId);
+            auto audioSourceId = audioSourceIdForClip(view, clip);
             if (!audioSourceId)
                 return std::nullopt;
 
             auto source = view.getAudioSource(*audioSourceId);
-            const auto sourceSampleRate = source && source->sampleRate > 0 ? source->sampleRate : 48000.0;
+            auto hostIt = audio_source_hosts.find(*audioSourceId);
+            const auto sourceSampleRate = source && source->sampleRate > 0
+                ? source->sampleRate
+                : hostIt != audio_source_hosts.end() && hostIt->second.sample_rate > 0.0
+                    ? hostIt->second.sample_rate
+                    : 48000.0;
             const auto timelineSampleRate = clip.sampleRate > 0 ? clip.sampleRate : sourceSampleRate;
             const auto modificationDuration = source && source->frameCount > 0
                 ? secondsFromSamples(source->frameCount, sourceSampleRate)
-                : secondsFromSamples(clip.durationSamples, sourceSampleRate);
+                : hostIt != audio_source_hosts.end() && hostIt->second.frame_count > 0
+                    ? secondsFromSamples(hostIt->second.frame_count, sourceSampleRate)
+                    : secondsFromSamples(clip.durationSamples, sourceSampleRate);
             const auto timing = playbackRegionTiming(
                 clip.position.samples,
                 clip.durationSamples,
@@ -930,6 +1158,9 @@ namespace uapmd::ara {
 
         void destroyPlaybackRegion(const ProjectObjectId& clipId) {
             auto* controller = controllerInterface();
+            std::optional<ProjectObjectId> ownerAudioSourceId;
+            if (auto ownerIt = playback_region_audio_source_ids.find(clipId); ownerIt != playback_region_audio_source_ids.end())
+                ownerAudioSourceId = ownerIt->second;
             auto it = playback_region_refs.find(clipId);
             if (it != playback_region_refs.end()) {
                 removePlaybackRegionFromRenderer(it->second);
@@ -940,6 +1171,10 @@ namespace uapmd::ara {
             playback_region_hosts.erase(clipId);
             playback_region_track_ids.erase(clipId);
             playback_region_audio_source_ids.erase(clipId);
+            midi_clip_audio_source_ids.erase(clipId);
+
+            if (ownerAudioSourceId && isSyntheticMidiAudioSourceId(*ownerAudioSourceId))
+                destroyAudioSource(*ownerAudioSourceId);
         }
 
         void destroyRegionSequence(const ProjectObjectId& trackId) {
@@ -968,7 +1203,12 @@ namespace uapmd::ara {
             host = HostAudioSource{
                 .id = audioSourceId,
                 .name = source->filepath.empty() ? audioSourceId : source->filepath,
-                .persistent_id = "uapmd.audio-source." + audioSourceId
+                .persistent_id = "uapmd.audio-source." + audioSourceId,
+                .clip_id = source->clipId,
+                .synthetic_midi = false,
+                .channel_count = source->channelCount,
+                .sample_rate = source->sampleRate,
+                .frame_count = source->frameCount
             };
             auto properties = audioSourceProperties(*source, host);
             auto existing = audio_source_refs.find(audioSourceId);
@@ -1016,7 +1256,121 @@ namespace uapmd::ara {
                     sourceRef,
                     reinterpret_cast<ARA::ARAAudioModificationHostRef>(&modificationHost),
                     &modificationProps);
+            if (audio_modification_refs.contains(modificationId) && controller->updateAudioSourceContent)
+                controller->updateAudioSourceContent(
+                    controller_instance->documentControllerRef,
+                    sourceRef,
+                    nullptr,
+                    ARA::kARAContentUpdateEverythingChanged);
             return audio_modification_refs.contains(modificationId);
+        }
+
+        bool createOrUpdateMidiAudioSource(const ProjectClipSnapshot& clip) {
+            auto* controller = controllerInterface();
+            if (!controller || clip.clipType != ClipType::Midi)
+                return false;
+
+            const auto audioSourceId = syntheticMidiAudioSourceId(clip.clipId);
+            auto& host = audio_source_hosts[audioSourceId];
+            host = HostAudioSource{
+                .id = audioSourceId,
+                .name = clip.name.empty() ? clip.clipId : clip.name,
+                .persistent_id = "uapmd.midi-source." + clip.clipId,
+                .clip_id = clip.clipId,
+                .synthetic_midi = true,
+                .channel_count = 1,
+                .sample_rate = clip.sampleRate > 0.0 ? clip.sampleRate : 48000.0,
+                .frame_count = std::max<int64_t>(1, clip.durationSamples)
+            };
+
+            auto properties = syntheticAudioSourceProperties(host);
+            auto existing = audio_source_refs.find(audioSourceId);
+            if (existing != audio_source_refs.end()) {
+                if (controller->updateAudioSourceProperties)
+                    controller->updateAudioSourceProperties(
+                        controller_instance->documentControllerRef,
+                        existing->second,
+                        &properties);
+                if (controller->updateAudioSourceContent)
+                    controller->updateAudioSourceContent(
+                        controller_instance->documentControllerRef,
+                        existing->second,
+                        nullptr,
+                        araNotesChangedFlags());
+                if (araDiagnosticsEnabled())
+                    std::cerr << "[ARA] MIDI audio source updated: " << audioSourceId
+                              << " notes=" << makeClipNotes(clip, 0.0, nullptr).size() << std::endl;
+                return true;
+            }
+
+            if (!controller->createAudioSource)
+                return false;
+            auto sourceRef = controller->createAudioSource(
+                controller_instance->documentControllerRef,
+                reinterpret_cast<ARA::ARAAudioSourceHostRef>(&host),
+                &properties);
+            if (!sourceRef)
+                return false;
+            audio_source_refs[audioSourceId] = sourceRef;
+            if (controller->enableAudioSourceSamplesAccess)
+                controller->enableAudioSourceSamplesAccess(
+                    controller_instance->documentControllerRef,
+                    sourceRef,
+                    ARA::kARATrue);
+
+            const auto modificationId = "mod." + audioSourceId;
+            auto& modificationHost = audio_modification_hosts[modificationId];
+            modificationHost = HostAudioModification{
+                .id = modificationId,
+                .name = host.name,
+                .persistent_id = "uapmd.midi-modification." + clip.clipId
+            };
+            auto modificationProps = audioModificationProperties(modificationHost);
+            if (controller->createAudioModification)
+                audio_modification_refs[modificationId] = controller->createAudioModification(
+                    controller_instance->documentControllerRef,
+                    sourceRef,
+                    reinterpret_cast<ARA::ARAAudioModificationHostRef>(&modificationHost),
+                    &modificationProps);
+            if (audio_modification_refs.contains(modificationId) && controller->updateAudioSourceContent)
+                controller->updateAudioSourceContent(
+                    controller_instance->documentControllerRef,
+                    sourceRef,
+                    nullptr,
+                    araNotesChangedFlags());
+            if (audio_modification_refs.contains(modificationId) && araDiagnosticsEnabled())
+                std::cerr << "[ARA] MIDI audio source created: " << audioSourceId
+                          << " notes=" << makeClipNotes(clip, 0.0, nullptr).size() << std::endl;
+            return audio_modification_refs.contains(modificationId);
+        }
+
+        bool updateAudioSourceNoteContent(const ProjectObjectId& audioSourceId) {
+            auto* controller = controllerInterface();
+            if (!controller || !controller->updateAudioSourceContent)
+                return false;
+            auto sourceIt = audio_source_refs.find(audioSourceId);
+            if (sourceIt == audio_source_refs.end())
+                return false;
+            controller->updateAudioSourceContent(
+                controller_instance->documentControllerRef,
+                sourceIt->second,
+                nullptr,
+                araNotesChangedFlags());
+            if (araDiagnosticsEnabled()) {
+                size_t noteCount = 0;
+                auto hostIt = audio_source_hosts.find(audioSourceId);
+                if (document_view && hostIt != audio_source_hosts.end()) {
+                    if (hostIt->second.synthetic_midi) {
+                        if (auto clip = document_view->getClip(hostIt->second.clip_id))
+                            noteCount = makeClipNotes(*clip, 0.0, nullptr).size();
+                    } else if (auto source = document_view->getAudioSource(audioSourceId)) {
+                        noteCount = makeAudioSourceNotes(*source, nullptr).size();
+                    }
+                }
+                std::cerr << "[ARA] audio source note content updated: "
+                          << audioSourceId << " notes=" << noteCount << std::endl;
+            }
+            return true;
         }
 
         void destroyAudioSource(const ProjectObjectId& audioSourceId) {
@@ -1045,19 +1399,50 @@ namespace uapmd::ara {
         bool createOrUpdatePlaybackRegion(ProjectDocumentView& view, const ProjectObjectId& clipId) {
             auto* controller = controllerInterface();
             auto clip = view.getClip(clipId);
-            if (!controller || !clip || clip->clipType != ClipType::Audio)
+            if (!controller || !clip)
                 return false;
+            if (clip->clipType != ClipType::Audio && clip->clipType != ClipType::Midi)
+                return false;
+
+            if (clip->clipType == ClipType::Midi) {
+                auto previousOwnerIt = midi_clip_audio_source_ids.find(clipId);
+                std::optional<ProjectObjectId> previousOwner;
+                if (previousOwnerIt != midi_clip_audio_source_ids.end())
+                    previousOwner = previousOwnerIt->second;
+
+                if (auto associatedAudioSourceId = associatedAudioSourceIdForMidiClip(view, *clip)) {
+                    if (!audio_source_refs.contains(*associatedAudioSourceId) &&
+                        !createOrUpdateAudioSource(view, *associatedAudioSourceId))
+                        return false;
+
+                    if (playback_region_refs.contains(clipId))
+                        destroyPlaybackRegion(clipId);
+                    midi_clip_audio_source_ids[clipId] = *associatedAudioSourceId;
+                    auto handled = updateAudioSourceNoteContent(*associatedAudioSourceId);
+                    if (previousOwner && *previousOwner != *associatedAudioSourceId)
+                        updateAudioSourceNoteContent(*previousOwner);
+                    return handled;
+                }
+
+                if (previousOwner && !isSyntheticMidiAudioSourceId(*previousOwner))
+                    updateAudioSourceNoteContent(*previousOwner);
+            }
 
             if (!region_sequence_refs.contains(clip->trackId) &&
                 !createOrUpdateRegionSequence(view, clip->trackId))
                 return false;
 
-            auto audioSourceId = audioSourceIdForClip(view, clipId);
+            auto audioSourceId = audioSourceIdForClip(view, *clip);
             if (!audioSourceId)
                 return false;
-            if (!audio_modification_refs.contains("mod." + *audioSourceId) &&
-                !createOrUpdateAudioSource(view, *audioSourceId))
+            if (clip->clipType == ClipType::Midi) {
+                if (!createOrUpdateMidiAudioSource(*clip))
+                    return false;
+                midi_clip_audio_source_ids[clipId] = *audioSourceId;
+            } else if (!audio_modification_refs.contains("mod." + *audioSourceId) &&
+                       !createOrUpdateAudioSource(view, *audioSourceId)) {
                 return false;
+            }
 
             auto sequenceIt = region_sequence_refs.find(clip->trackId);
             auto modificationIt = audio_modification_refs.find("mod." + *audioSourceId);
@@ -1096,6 +1481,9 @@ namespace uapmd::ara {
 
             playback_region_track_ids[clipId] = clip->trackId;
             playback_region_audio_source_ids[clipId] = *audioSourceId;
+            if (clip->clipType == ClipType::Audio)
+                for (const auto& midiClip : associatedMidiClipsForAudioClip(view, *clip))
+                    createOrUpdatePlaybackRegion(view, midiClip.clipId);
             return true;
         }
 
@@ -1113,10 +1501,10 @@ namespace uapmd::ara {
             }
             if (controller->updateMusicalContextContent)
                 controller->updateMusicalContextContent(
-                    controller_instance->documentControllerRef,
-                    musical_context_ref,
-                    nullptr,
-                    ARA::kARAContentUpdateEverythingChanged);
+                        controller_instance->documentControllerRef,
+                        musical_context_ref,
+                        nullptr,
+                        ARA::kARAContentUpdateEverythingChanged);
             return true;
         }
 
@@ -1160,12 +1548,27 @@ namespace uapmd::ara {
                     break;
                 case ProjectDocumentEventKind::ClipAdded:
                 case ProjectDocumentEventKind::ClipChanged:
-                    if (event.clipId())
+                    if (event.clipId()) {
+                        auto clip = view.getClip(*event.clipId());
+                        if (araDiagnosticsEnabled())
+                            std::cerr << "[ARA] clip event: type=" << event.type()
+                                      << " clip=" << *event.clipId()
+                                      << " clip-type=" << (clip ? (clip->clipType == ClipType::Midi ? "midi" : "audio") : "missing")
+                                      << std::endl;
                         handled = createOrUpdatePlaybackRegion(view, *event.clipId());
+                        if (araDiagnosticsEnabled())
+                            std::cerr << "[ARA] clip event handled=" << (handled ? "true" : "false")
+                                      << " clip=" << *event.clipId() << std::endl;
+                    }
                     break;
                 case ProjectDocumentEventKind::ClipRemoved:
                     if (event.clipId()) {
+                        std::optional<ProjectObjectId> ownerAudioSourceId;
+                        if (auto ownerIt = midi_clip_audio_source_ids.find(*event.clipId()); ownerIt != midi_clip_audio_source_ids.end())
+                            ownerAudioSourceId = ownerIt->second;
                         destroyPlaybackRegion(*event.clipId());
+                        if (ownerAudioSourceId && !isSyntheticMidiAudioSourceId(*ownerAudioSourceId))
+                            updateAudioSourceNoteContent(*ownerAudioSourceId);
                         handled = true;
                     }
                     break;
@@ -1594,7 +1997,6 @@ namespace uapmd::ara {
             HostRegionSequence* musicalContextHost,
             ARA::ARAContentType contentType,
             const ARA::ARAContentTimeRange* range) {
-            (void) range;
             if (!isMusicalContentAvailableFromImpl(impl, musicalContextHost, contentType))
                 return nullptr;
 
@@ -1622,6 +2024,72 @@ namespace uapmd::ara {
                 default:
                     return nullptr;
             }
+            return reinterpret_cast<ARA::ARAContentReaderHostRef>(reader.release());
+        }
+
+        ARA::ARABool isAudioSourceContentAvailableFromImpl(
+            AraHostDocumentController::Impl* impl,
+            HostAudioSource* audioSourceHost,
+            ARA::ARAContentType contentType) {
+            if (!impl || !impl->document_view || !audioSourceHost)
+                return ARA::kARAFalse;
+            if (contentType != ARA::kARAContentTypeNotes)
+                return ARA::kARAFalse;
+
+            ARA::ARABool available = ARA::kARAFalse;
+            if (audioSourceHost->synthetic_midi) {
+                available = clipIdFromSyntheticMidiAudioSourceId(audioSourceHost->id).has_value()
+                    ? ARA::kARATrue
+                    : ARA::kARAFalse;
+            } else if (auto source = impl->document_view->getAudioSource(audioSourceHost->id)) {
+                if (auto audioClip = impl->document_view->getClip(source->clipId))
+                    available = !impl->associatedMidiClipsForAudioClip(*impl->document_view, *audioClip).empty()
+                        ? ARA::kARATrue
+                        : ARA::kARAFalse;
+            }
+
+            if (araDiagnosticsEnabled())
+                std::cerr << "[ARA] isAudioSourceContentAvailable(notes): " << audioSourceHost->id
+                          << " -> " << (available == ARA::kARATrue ? "true" : "false") << std::endl;
+            return available;
+        }
+
+        ARA::ARAContentGrade getAudioSourceContentGradeFromImpl(
+            AraHostDocumentController::Impl* impl,
+            HostAudioSource* audioSourceHost,
+            ARA::ARAContentType contentType) {
+            if (!isAudioSourceContentAvailableFromImpl(impl, audioSourceHost, contentType))
+                return ARA::kARAContentGradeInitial;
+            return ARA::kARAContentGradeAdjusted;
+        }
+
+        ARA::ARAContentReaderHostRef createAudioSourceContentReaderFromImpl(
+            AraHostDocumentController::Impl* impl,
+            HostAudioSource* audioSourceHost,
+            ARA::ARAContentType contentType,
+            const ARA::ARAContentTimeRange* range) {
+            if (!isAudioSourceContentAvailableFromImpl(impl, audioSourceHost, contentType))
+                return nullptr;
+
+            auto reader = std::make_unique<HostContentReader>();
+            reader->content_type = contentType;
+            if (audioSourceHost->synthetic_midi) {
+                auto clipId = clipIdFromSyntheticMidiAudioSourceId(audioSourceHost->id);
+                if (!clipId)
+                    return nullptr;
+                auto clip = impl->document_view->getClip(*clipId);
+                if (!clip || clip->clipType != ClipType::Midi)
+                    return nullptr;
+                reader->notes = impl->makeClipNotes(*clip, 0.0, range);
+            } else {
+                auto source = impl->document_view->getAudioSource(audioSourceHost->id);
+                if (!source)
+                    return nullptr;
+                reader->notes = impl->makeAudioSourceNotes(*source, range);
+            }
+            if (araDiagnosticsEnabled())
+                std::cerr << "[ARA] createAudioSourceContentReader(notes): " << audioSourceHost->id
+                          << " events=" << reader->notes.size() << std::endl;
             return reinterpret_cast<ARA::ARAContentReaderHostRef>(reader.release());
         }
 
@@ -1655,28 +2123,49 @@ namespace uapmd::ara {
                 return ARA::kARAFalse;
 
             auto source = impl->document_view->getAudioSource(reader->audio_source_id);
-            if (!source || source->channelCount == 0)
+            auto hostIt = impl->audio_source_hosts.find(reader->audio_source_id);
+            if ((!source || source->channelCount == 0) &&
+                (hostIt == impl->audio_source_hosts.end() || !hostIt->second.synthetic_midi))
                 return ARA::kARAFalse;
+
+            const auto channelCount = source && source->channelCount > 0
+                ? source->channelCount
+                : hostIt != impl->audio_source_hosts.end()
+                    ? std::max<uint32_t>(1, hostIt->second.channel_count)
+                    : 0;
+            if (channelCount == 0)
+                return ARA::kARAFalse;
+
+            if (!source) {
+                if (!reader->use64BitSamples) {
+                    for (uint32_t ch = 0; ch < channelCount; ch++)
+                        std::fill_n(static_cast<float*>(buffers[ch]), samplesPerChannel, 0.0f);
+                } else {
+                    for (uint32_t ch = 0; ch < channelCount; ch++)
+                        std::fill_n(static_cast<double*>(buffers[ch]), samplesPerChannel, 0.0);
+                }
+                return ARA::kARATrue;
+            }
 
             if (!reader->use64BitSamples) {
                 std::vector<float*> floatBuffers;
-                floatBuffers.reserve(source->channelCount);
-                for (uint32_t ch = 0; ch < source->channelCount; ch++)
+                floatBuffers.reserve(channelCount);
+                for (uint32_t ch = 0; ch < channelCount; ch++)
                     floatBuffers.push_back(static_cast<float*>(buffers[ch]));
                 return impl->document_view->readAudioSourceSamples(
                     reader->audio_source_id,
                     samplePosition,
                     samplesPerChannel,
                     floatBuffers.data(),
-                    source->channelCount)
+                    channelCount)
                     ? ARA::kARATrue
                     : ARA::kARAFalse;
             }
 
-            std::vector<std::vector<float>> temp(source->channelCount);
+            std::vector<std::vector<float>> temp(channelCount);
             std::vector<float*> tempPtrs;
-            tempPtrs.reserve(source->channelCount);
-            for (uint32_t ch = 0; ch < source->channelCount; ch++) {
+            tempPtrs.reserve(channelCount);
+            for (uint32_t ch = 0; ch < channelCount; ch++) {
                 temp[ch].resize(static_cast<size_t>(samplesPerChannel));
                 tempPtrs.push_back(temp[ch].data());
             }
@@ -1685,10 +2174,10 @@ namespace uapmd::ara {
                     samplePosition,
                     samplesPerChannel,
                     tempPtrs.data(),
-                    source->channelCount))
+                    channelCount))
                 return ARA::kARAFalse;
 
-            for (uint32_t ch = 0; ch < source->channelCount; ch++) {
+            for (uint32_t ch = 0; ch < channelCount; ch++) {
                 auto* dst = static_cast<double*>(buffers[ch]);
                 for (ARA::ARASampleCount i = 0; i < samplesPerChannel; i++)
                     dst[i] = temp[ch][static_cast<size_t>(i)];
