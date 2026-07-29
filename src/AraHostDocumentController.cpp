@@ -67,6 +67,29 @@ namespace uapmd::ara {
             return static_cast<double>(samples) / sampleRate;
         }
 
+        struct PlaybackRegionTiming {
+            double startInModificationTime{0.0};
+            double durationInModificationTime{0.0};
+            double startInPlaybackTime{0.0};
+            double durationInPlaybackTime{0.0};
+        };
+
+        PlaybackRegionTiming playbackRegionTiming(
+            int64_t startInTimelineSamples,
+            int64_t durationInTimelineSamples,
+            double timelineSampleRate,
+            double modificationDuration) {
+            const auto startInPlaybackTime = secondsFromSamples(startInTimelineSamples, timelineSampleRate);
+            const auto durationInPlaybackTime = secondsFromSamples(durationInTimelineSamples, timelineSampleRate);
+            const auto clippedOffset = std::clamp(-std::min(0.0, startInPlaybackTime), 0.0, modificationDuration);
+            return PlaybackRegionTiming{
+                .startInModificationTime = clippedOffset,
+                .durationInModificationTime = std::max(0.0, modificationDuration - clippedOffset),
+                .startInPlaybackTime = std::max(0.0, startInPlaybackTime),
+                .durationInPlaybackTime = std::max(0.0, durationInPlaybackTime - clippedOffset)
+            };
+        }
+
         ARA::ARABool readAudioSamplesFromImpl(
             AraHostDocumentController::Impl* impl,
             HostAudioReader* reader,
@@ -741,6 +764,15 @@ namespace uapmd::ara {
 
                     auto source = view.getAudioSource(audioSourceId);
                     const auto sourceSampleRate = source && source->sampleRate > 0 ? source->sampleRate : 48000.0;
+                    const auto timelineSampleRate = clip->sampleRate > 0 ? clip->sampleRate : sourceSampleRate;
+                    const auto modificationDuration = source && source->frameCount > 0
+                        ? secondsFromSamples(source->frameCount, sourceSampleRate)
+                        : secondsFromSamples(clip->durationSamples, sourceSampleRate);
+                    const auto timing = playbackRegionTiming(
+                        clip->position.samples,
+                        clip->durationSamples,
+                        timelineSampleRate,
+                        modificationDuration);
                     auto& host = playback_region_hosts[clipId];
                     host = HostPlaybackRegion{
                         .id = clipId,
@@ -749,10 +781,10 @@ namespace uapmd::ara {
                     ARA::ARAPlaybackRegionProperties regionProperties{
                         .structSize = ARA::kARAPlaybackRegionPropertiesMinSize,
                         .transformationFlags = ARA::kARAPlaybackTransformationNoChanges,
-                        .startInModificationTime = 0.0,
-                        .durationInModificationTime = secondsFromSamples(clip->durationSamples, sourceSampleRate),
-                        .startInPlaybackTime = secondsFromSamples(clip->position.samples, sourceSampleRate),
-                        .durationInPlaybackTime = secondsFromSamples(clip->durationSamples, sourceSampleRate),
+                        .startInModificationTime = timing.startInModificationTime,
+                        .durationInModificationTime = timing.durationInModificationTime,
+                        .startInPlaybackTime = timing.startInPlaybackTime,
+                        .durationInPlaybackTime = timing.durationInPlaybackTime,
                         .musicalContextRef = musical_context_ref,
                         .regionSequenceRef = sequenceIt->second,
                         .name = host.name.c_str(),
@@ -838,13 +870,22 @@ namespace uapmd::ara {
 
             auto source = view.getAudioSource(*audioSourceId);
             const auto sourceSampleRate = source && source->sampleRate > 0 ? source->sampleRate : 48000.0;
+            const auto timelineSampleRate = clip.sampleRate > 0 ? clip.sampleRate : sourceSampleRate;
+            const auto modificationDuration = source && source->frameCount > 0
+                ? secondsFromSamples(source->frameCount, sourceSampleRate)
+                : secondsFromSamples(clip.durationSamples, sourceSampleRate);
+            const auto timing = playbackRegionTiming(
+                clip.position.samples,
+                clip.durationSamples,
+                timelineSampleRate,
+                modificationDuration);
             return ARA::ARAPlaybackRegionProperties{
                 .structSize = ARA::kARAPlaybackRegionPropertiesMinSize,
                 .transformationFlags = ARA::kARAPlaybackTransformationNoChanges,
-                .startInModificationTime = 0.0,
-                .durationInModificationTime = secondsFromSamples(clip.durationSamples, sourceSampleRate),
-                .startInPlaybackTime = secondsFromSamples(clip.position.samples, sourceSampleRate),
-                .durationInPlaybackTime = secondsFromSamples(clip.durationSamples, sourceSampleRate),
+                .startInModificationTime = timing.startInModificationTime,
+                .durationInModificationTime = timing.durationInModificationTime,
+                .startInPlaybackTime = timing.startInPlaybackTime,
+                .durationInPlaybackTime = timing.durationInPlaybackTime,
                 .musicalContextRef = musical_context_ref,
                 .regionSequenceRef = regionSequenceRef,
                 .name = host.name.c_str(),
